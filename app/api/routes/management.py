@@ -16,6 +16,7 @@ from app.db.models import (
     ProspectingBatch,
     ProspectingCandidate,
     QualifiedLead,
+    WhatsappSession,
 )
 from app.db.schemas import (
     AgentPreviewRequest,
@@ -49,6 +50,10 @@ from app.db.schemas import (
     ProspectingBatchCreate,
     ProspectingBatchRead,
     TaskListResponse,
+    WhatsappSessionCreate,
+    WhatsappSessionQrRead,
+    WhatsappSessionRead,
+    WhatsappSessionWorkspaceRead,
 )
 from app.api.routes import leads as lead_routes
 from app.services.conversation_agent import ConversationAgentService
@@ -57,6 +62,7 @@ from app.services.enrichment import EnrichmentService
 from app.services.prospecting import ProspectLead, ProspectingService
 from app.services.prospecting_advisor import ProspectingAdvisorService, ProspectingDraft
 from app.services.runtime_config import RuntimeConfigService
+from app.services.whatsapp_sessions import DEFAULT_WEBHOOK_EVENTS, WhatsappSessionService
 
 
 router = APIRouter(prefix="/api", tags=["management"])
@@ -209,6 +215,89 @@ def agent_preview(lead_id: int, payload: AgentPreviewRequest, db: Session = Depe
     return {"lead_id": lead.id, "preview_message": preview_message, "runtime_instruction": runtime_instruction}
 
 
+@router.get("/whatsapp-sessions", response_model=WhatsappSessionWorkspaceRead)
+def list_whatsapp_sessions(db: Session = Depends(get_db)) -> dict:
+    service = WhatsappSessionService()
+    items = service.list_sessions(db)
+    active = next((item for item in items if item.is_active), None)
+    return {
+        "items": items,
+        "active_session_id": active.id if active else None,
+        "provider_management_available": service.settings.has_wasender_management_credentials,
+        "legacy_label": service.legacy_scope_label(),
+    }
+
+
+@router.post("/whatsapp-sessions", response_model=WhatsappSessionRead)
+def create_whatsapp_session(payload: WhatsappSessionCreate, db: Session = Depends(get_db)) -> WhatsappSession:
+    service = WhatsappSessionService()
+    session = service.create_session(
+        db,
+        name=payload.name,
+        phone_number=payload.phone_number,
+        account_protection=payload.account_protection,
+        log_messages=payload.log_messages,
+        read_incoming_messages=payload.read_incoming_messages,
+        webhook_enabled=payload.webhook_enabled,
+        webhook_url=payload.webhook_url or service.default_webhook_url(),
+        webhook_events=payload.webhook_events or list(DEFAULT_WEBHOOK_EVENTS),
+        api_key=payload.api_key,
+        webhook_secret=payload.webhook_secret,
+        create_on_provider=payload.create_on_provider,
+        set_active=payload.set_active,
+    )
+    db.commit()
+    db.refresh(session)
+    return session
+
+
+@router.post("/whatsapp-sessions/sync", response_model=WhatsappSessionWorkspaceRead)
+def sync_whatsapp_sessions(db: Session = Depends(get_db)) -> dict:
+    service = WhatsappSessionService()
+    items = service.sync_all_from_provider(db)
+    db.commit()
+    active = next((item for item in items if item.is_active), None)
+    return {
+        "items": items,
+        "active_session_id": active.id if active else None,
+        "provider_management_available": service.settings.has_wasender_management_credentials,
+        "legacy_label": service.legacy_scope_label(),
+    }
+
+
+@router.post("/whatsapp-sessions/{session_id}/activate", response_model=WhatsappSessionRead)
+def activate_whatsapp_session(session_id: int, db: Session = Depends(get_db)) -> WhatsappSession:
+    session = _get_whatsapp_session_or_404(db, session_id)
+    WhatsappSessionService().activate(db, session)
+    db.commit()
+    db.refresh(session)
+    return session
+
+
+@router.post("/whatsapp-sessions/{session_id}/connect", response_model=WhatsappSessionQrRead)
+def connect_whatsapp_session(session_id: int, db: Session = Depends(get_db)) -> dict:
+    session = _get_whatsapp_session_or_404(db, session_id)
+    result = WhatsappSessionService().connect_session(db, session)
+    db.commit()
+    return {
+        "session_id": session.id,
+        "status": str(result.get("status")) if result.get("status") else session.status,
+        "qr_code": str(result.get("qrCode")) if result.get("qrCode") else None,
+    }
+
+
+@router.get("/whatsapp-sessions/{session_id}/qrcode", response_model=WhatsappSessionQrRead)
+def get_whatsapp_session_qrcode(session_id: int, db: Session = Depends(get_db)) -> dict:
+    session = _get_whatsapp_session_or_404(db, session_id)
+    qr_code = WhatsappSessionService().get_qrcode(db, session)
+    db.commit()
+    return {
+        "session_id": session.id,
+        "status": session.status,
+        "qr_code": qr_code,
+    }
+
+
 @router.get("/conversations", response_model=ConversationListResponse)
 def list_conversations(
     page: int = Query(default=1, ge=1),
@@ -219,10 +308,18 @@ def list_conversations(
     manual_mode: bool | None = None,
     unread_only: bool = False,
     pending_review_only: bool = False,
+    whatsapp_session_id: int | None = None,
+    active_session_only: bool = False,
+    legacy_only: bool = False,
     db: Session = Depends(get_db),
 ) -> dict:
-    stmt = select(Conversation).options(selectinload(Conversation.messages), selectinload(Conversation.lead))
+    stmt = select(Conversation).options(
+        selectinload(Conversation.messages),
+        selectinload(Conversation.lead),
+        selectinload(Conversation.whatsapp_session),
+    )
     count_stmt = select(func.count()).select_from(Conversation)
+    session_service = WhatsappSessionService()
 
     if stage:
         stmt = stmt.where(Conversation.stage == stage)
@@ -242,6 +339,20 @@ def list_conversations(
     if pending_review_only:
         stmt = stmt.where(Conversation.pending_human_review.is_(True))
         count_stmt = count_stmt.where(Conversation.pending_human_review.is_(True))
+    if active_session_only:
+        active_session = session_service.get_active_session(db)
+        if active_session:
+            stmt = stmt.where(Conversation.whatsapp_session_id == active_session.id)
+            count_stmt = count_stmt.where(Conversation.whatsapp_session_id == active_session.id)
+        else:
+            stmt = stmt.where(Conversation.id == -1)
+            count_stmt = count_stmt.where(Conversation.id == -1)
+    elif legacy_only:
+        stmt = stmt.where(Conversation.whatsapp_session_id.is_(None))
+        count_stmt = count_stmt.where(Conversation.whatsapp_session_id.is_(None))
+    elif whatsapp_session_id is not None:
+        stmt = stmt.where(Conversation.whatsapp_session_id == whatsapp_session_id)
+        count_stmt = count_stmt.where(Conversation.whatsapp_session_id == whatsapp_session_id)
 
     total = db.scalar(count_stmt) or 0
     rows = list(
@@ -259,6 +370,9 @@ def list_conversations(
                 lead_id=row.lead_id,
                 lead_name=row.lead.business_name if row.lead else "Lead",
                 phone_number=row.lead.phone_number if row.lead else None,
+                whatsapp_session_id=row.whatsapp_session_id,
+                whatsapp_session_name=row.whatsapp_session_name,
+                whatsapp_session_phone_number=row.whatsapp_session_phone_number,
                 temperature=row.temperature,
                 stage=row.stage,
                 unread_count=row.unread_count,
@@ -280,7 +394,7 @@ def list_conversations(
 def get_conversation_detail(conversation_id: int, db: Session = Depends(get_db)) -> Conversation:
     stmt = (
         select(Conversation)
-        .options(selectinload(Conversation.messages))
+        .options(selectinload(Conversation.messages), selectinload(Conversation.whatsapp_session))
         .where(Conversation.id == conversation_id)
     )
     conversation = db.scalars(stmt).one_or_none()
@@ -728,13 +842,20 @@ def update_knowledge_item(item_id: int, payload: KnowledgeItemUpdate, db: Sessio
 def _get_conversation_or_404(db: Session, conversation_id: int) -> Conversation:
     stmt = (
         select(Conversation)
-        .options(selectinload(Conversation.messages))
+        .options(selectinload(Conversation.messages), selectinload(Conversation.whatsapp_session))
         .where(Conversation.id == conversation_id)
     )
     conversation = db.scalars(stmt).one_or_none()
     if not conversation:
         raise HTTPException(status_code=404, detail="Conversa não encontrada.")
     return conversation
+
+
+def _get_whatsapp_session_or_404(db: Session, session_id: int) -> WhatsappSession:
+    session = db.get(WhatsappSession, session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Sessão WhatsApp não encontrada.")
+    return session
 
 
 def _get_batch_or_404(db: Session, batch_id: int) -> ProspectingBatch:

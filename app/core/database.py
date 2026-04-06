@@ -34,6 +34,7 @@ def init_db() -> None:
 
     Base.metadata.create_all(bind=engine)
     _ensure_schema_columns()
+    _ensure_schema_constraints()
 
 
 def _ensure_schema_columns() -> None:
@@ -48,6 +49,7 @@ def _ensure_schema_columns() -> None:
             "campaign_id": "INTEGER",
         },
         "conversations": {
+            "whatsapp_session_id": "INTEGER",
             "last_inbound_at": "TIMESTAMP",
             "last_outbound_at": "TIMESTAMP",
             "unread_count": "INTEGER DEFAULT 0 NOT NULL",
@@ -70,6 +72,22 @@ def _ensure_schema_columns() -> None:
             "scheduled_reason": "VARCHAR(120)",
             "review_required": bool_false,
         },
+        "whatsapp_sessions": {
+            "wasender_session_id": "INTEGER",
+            "phone_number": "VARCHAR(40)",
+            "status": "VARCHAR(40) DEFAULT 'disconnected' NOT NULL",
+            "api_key": "VARCHAR(255)",
+            "webhook_secret": "VARCHAR(255)",
+            "webhook_url": "VARCHAR(500)",
+            "webhook_enabled": bool_false,
+            "webhook_events": "JSON" if dialect == "postgresql" else "JSON",
+            "account_protection": bool_true,
+            "log_messages": bool_true,
+            "read_incoming_messages": bool_false,
+            "source": "VARCHAR(40) DEFAULT 'manual' NOT NULL",
+            "is_active": bool_false,
+            "last_synced_at": "TIMESTAMP",
+        },
         "prospecting_candidates": {
             "lead_id": "INTEGER",
             "conversation_id": "INTEGER",
@@ -88,3 +106,25 @@ def _ensure_schema_columns() -> None:
                 if column_name in existing:
                     continue
                 connection.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {definition}"))
+
+
+def _ensure_schema_constraints() -> None:
+    inspector = inspect(engine)
+    dialect = engine.dialect.name
+
+    if dialect == "postgresql":
+        existing_constraints = {item["name"] for item in inspector.get_unique_constraints("conversations")}
+        with engine.begin() as connection:
+            if "uq_lead_channel" in existing_constraints:
+                connection.execute(text("ALTER TABLE conversations DROP CONSTRAINT uq_lead_channel"))
+            if "uq_lead_channel_session" not in existing_constraints:
+                connection.execute(
+                    text(
+                        "ALTER TABLE conversations "
+                        "ADD CONSTRAINT uq_lead_channel_session UNIQUE (lead_id, channel, whatsapp_session_id)"
+                    )
+                )
+        return
+
+    if dialect == "sqlite":
+        return

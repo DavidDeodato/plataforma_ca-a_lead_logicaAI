@@ -83,6 +83,9 @@ class ConversationRead(BaseModel):
     id: int
     lead_id: int
     channel: str
+    whatsapp_session_id: int | None = None
+    whatsapp_session_name: str | None = None
+    whatsapp_session_phone_number: str | None = None
     external_chat_id: str | None = None
     temperature: str
     stage: str
@@ -152,6 +155,9 @@ class ConversationListItemRead(BaseModel):
     lead_id: int
     lead_name: str
     phone_number: str | None = None
+    whatsapp_session_id: int | None = None
+    whatsapp_session_name: str | None = None
+    whatsapp_session_phone_number: str | None = None
     temperature: str
     stage: str
     unread_count: int = 0
@@ -476,3 +482,49 @@ class ProspectingBatchRead(BaseModel):
 class ProspectingBatchActionRequest(BaseModel):
     candidate_ids: list[int] = Field(min_length=1)
     action: str
+
+
+class WhatsappSessionBase(BaseModel):
+    name: str
+    phone_number: str | None = None
+    account_protection: bool = True
+    log_messages: bool = True
+    read_incoming_messages: bool = False
+    webhook_enabled: bool = True
+    webhook_url: str | None = None
+    webhook_events: list[str] = Field(default_factory=list)
+
+
+class WhatsappSessionCreate(WhatsappSessionBase):
+    api_key: str | None = None
+    webhook_secret: str | None = None
+    create_on_provider: bool = False
+    set_active: bool = True
+
+
+class WhatsappSessionRead(WhatsappSessionBase):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    wasender_session_id: int | None = None
+    status: str
+    source: str
+    is_active: bool
+    has_api_key: bool = False
+    has_webhook_secret: bool = False
+    last_synced_at: datetime | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class WhatsappSessionWorkspaceRead(BaseModel):
+    items: list[WhatsappSessionRead]
+    active_session_id: int | None = None
+    provider_management_available: bool = False
+    legacy_label: str = "Histórico legado"
+
+
+class WhatsappSessionQrRead(BaseModel):
+    session_id: int
+    status: str | None = None
+    qr_code: str | None = None

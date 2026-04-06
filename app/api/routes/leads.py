@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select
+from sqlalchemy import desc, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.core.config import get_settings
@@ -15,6 +15,7 @@ from app.services.conversation_ops import ConversationOpsService
 from app.services.enrichment import EnrichmentService
 from app.services.prospecting import ProspectLead, ProspectingService
 from app.services.runtime_config import RuntimeConfigService
+from app.services.whatsapp_sessions import WhatsappSessionService
 
 
 router = APIRouter(prefix="/api", tags=["leads"])
@@ -80,12 +81,18 @@ def start_outreach(lead_id: int, db: Session = Depends(get_db)) -> Conversation:
 
 @router.get("/leads/{lead_id}/conversation", response_model=ConversationRead)
 def get_lead_conversation(lead_id: int, db: Session = Depends(get_db)) -> Conversation:
+    active_session = WhatsappSessionService().get_active_session(db)
     stmt = (
         select(Conversation)
-        .options(selectinload(Conversation.messages))
+        .options(selectinload(Conversation.messages), selectinload(Conversation.whatsapp_session))
         .where(Conversation.lead_id == lead_id, Conversation.channel == "whatsapp")
+        .order_by(
+            desc(Conversation.whatsapp_session_id == (active_session.id if active_session else -1)),
+            Conversation.last_message_at.desc().nullslast(),
+            Conversation.id.desc(),
+        )
     )
-    conversation = db.scalars(stmt).one_or_none()
+    conversation = db.scalars(stmt).first()
     if not conversation:
         raise HTTPException(status_code=404, detail="Conversa não encontrada.")
     return conversation
@@ -158,10 +165,22 @@ def _latest_research_payload(lead: Lead) -> dict:
 
 
 def _get_or_create_conversation(db: Session, lead: Lead) -> Conversation:
-    conversation = db.scalar(select(Conversation).where(Conversation.lead_id == lead.id, Conversation.channel == "whatsapp"))
+    active_session = WhatsappSessionService().get_active_session(db)
+    stmt = select(Conversation).where(Conversation.lead_id == lead.id, Conversation.channel == "whatsapp")
+    if active_session:
+        stmt = stmt.where(Conversation.whatsapp_session_id == active_session.id)
+    else:
+        stmt = stmt.where(Conversation.whatsapp_session_id.is_(None))
+    conversation = db.scalar(stmt)
     if conversation:
         return conversation
-    conversation = Conversation(lead=lead, channel="whatsapp", stage="new", temperature="cold")
+    conversation = Conversation(
+        lead=lead,
+        channel="whatsapp",
+        stage="new",
+        temperature="cold",
+        whatsapp_session_id=active_session.id if active_session else None,
+    )
     db.add(conversation)
     db.flush()
     return conversation
@@ -170,7 +189,13 @@ def _get_or_create_conversation(db: Session, lead: Lead) -> Conversation:
 def _ensure_followup_task(db: Session, lead: Lead, research: dict) -> None:
     task = db.scalar(select(AgentTask).where(AgentTask.lead_id == lead.id, AgentTask.task_type == "follow_up"))
     runtime = RuntimeConfigService().get_runtime_config(db)
-    conversation = db.scalar(select(Conversation).where(Conversation.lead_id == lead.id, Conversation.channel == "whatsapp"))
+    active_session = WhatsappSessionService().get_active_session(db)
+    conversation_stmt = select(Conversation).where(Conversation.lead_id == lead.id, Conversation.channel == "whatsapp")
+    if active_session:
+        conversation_stmt = conversation_stmt.where(Conversation.whatsapp_session_id == active_session.id)
+    else:
+        conversation_stmt = conversation_stmt.where(Conversation.whatsapp_session_id.is_(None))
+    conversation = db.scalar(conversation_stmt)
     if task:
         task.next_run_at = utcnow() + timedelta(days=1)
         task.payload = research

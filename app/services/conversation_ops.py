@@ -8,9 +8,10 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
-from app.db.models import AgentTask, Conversation, Lead, Message
+from app.db.models import AgentTask, Conversation, Lead, Message, WhatsappSession
 from app.services.runtime_config import RuntimeConfigService
 from app.services.wasender_client import WasenderClient
+from app.services.whatsapp_sessions import WhatsappSessionService
 
 
 def utcnow() -> datetime:
@@ -24,6 +25,7 @@ class ConversationOpsService:
     def __init__(self) -> None:
         self.settings = get_settings()
         self.runtime_service = RuntimeConfigService()
+        self.session_service = WhatsappSessionService()
 
     def apply_defaults(self, db: Session, conversation: Conversation) -> Conversation:
         runtime = self.runtime_service.get_runtime_config(db)
@@ -210,7 +212,8 @@ class ConversationOpsService:
         respect_rate_limit: bool = True,
     ) -> Message:
         runtime = self.runtime_service.get_runtime_config(db)
-        can_send_real = bool(runtime["outbound_enabled"]) and self.settings.has_wasender_credentials
+        outbound_session = self._resolve_outbound_session(db, conversation)
+        can_send_real = bool(runtime["outbound_enabled"]) and bool(self._session_api_key(outbound_session))
         now = utcnow()
 
         if can_send_real and respect_rate_limit:
@@ -245,7 +248,10 @@ class ConversationOpsService:
 
         send_result: dict[str, Any] = metadata or {"data": {"status": "draft_only", "msgId": None}}
         if can_send_real:
-            send_result = WasenderClient().send_text_message(to=lead.whatsapp_number or lead.phone_number, text=text)
+            send_result = WasenderClient(api_key=self._session_api_key(outbound_session)).send_text_message(
+                to=lead.whatsapp_number or lead.phone_number,
+                text=text,
+            )
 
         message = Message(
             conversation_id=conversation.id,
@@ -294,7 +300,11 @@ class ConversationOpsService:
         message: Message,
         task: AgentTask,
     ) -> Message:
-        send_result = WasenderClient().send_text_message(to=lead.whatsapp_number or lead.phone_number, text=message.content)
+        outbound_session = self._resolve_outbound_session(db, conversation)
+        send_result = WasenderClient(api_key=self._session_api_key(outbound_session)).send_text_message(
+            to=lead.whatsapp_number or lead.phone_number,
+            text=message.content,
+        )
         if self.is_rate_limited(send_result):
             retry_after = self.extract_retry_after_seconds(send_result) or PROVIDER_RATE_LIMIT_SECONDS
             queue_context = dict(task.payload or {})
@@ -329,3 +339,11 @@ class ConversationOpsService:
         task.status = "completed" if not str(message.status).startswith("send_") else "failed"
         task.last_result = f"Mensagem processada com status {message.status}."
         return message
+
+    def _resolve_outbound_session(self, db: Session, conversation: Conversation) -> WhatsappSession | None:
+        if conversation.whatsapp_session_id:
+            return db.get(WhatsappSession, conversation.whatsapp_session_id)
+        return self.session_service.get_active_session(db)
+
+    def _session_api_key(self, session: WhatsappSession | None) -> str | None:
+        return session.api_key if session and session.api_key else self.settings.wasender_api_key or None

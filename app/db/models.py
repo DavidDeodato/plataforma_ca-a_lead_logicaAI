@@ -40,6 +40,39 @@ class Lead(Base):
     campaign: Mapped[Campaign | None] = relationship(back_populates="leads")
 
 
+class WhatsappSession(Base):
+    __tablename__ = "whatsapp_sessions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    name: Mapped[str] = mapped_column(String(160), index=True)
+    wasender_session_id: Mapped[int | None] = mapped_column(Integer, unique=True, index=True)
+    phone_number: Mapped[str | None] = mapped_column(String(40), index=True)
+    status: Mapped[str] = mapped_column(String(40), default="disconnected", index=True)
+    api_key: Mapped[str | None] = mapped_column(String(255), unique=True, index=True)
+    webhook_secret: Mapped[str | None] = mapped_column(String(255))
+    webhook_url: Mapped[str | None] = mapped_column(String(500))
+    webhook_enabled: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    webhook_events: Mapped[list[str] | None] = mapped_column(JSON)
+    account_protection: Mapped[bool] = mapped_column(Boolean, default=True)
+    log_messages: Mapped[bool] = mapped_column(Boolean, default=True)
+    read_incoming_messages: Mapped[bool] = mapped_column(Boolean, default=False)
+    source: Mapped[str] = mapped_column(String(40), default="manual", index=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    last_synced_at: Mapped[datetime | None] = mapped_column(DateTime)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+    conversations: Mapped[list[Conversation]] = relationship(back_populates="whatsapp_session")
+
+    @property
+    def has_api_key(self) -> bool:
+        return bool(self.api_key)
+
+    @property
+    def has_webhook_secret(self) -> bool:
+        return bool(self.webhook_secret)
+
+
 class LeadResearch(Base):
     __tablename__ = "lead_research"
 
@@ -58,11 +91,12 @@ class LeadResearch(Base):
 
 class Conversation(Base):
     __tablename__ = "conversations"
-    __table_args__ = (UniqueConstraint("lead_id", "channel", name="uq_lead_channel"),)
+    __table_args__ = (UniqueConstraint("lead_id", "channel", "whatsapp_session_id", name="uq_lead_channel_session"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     lead_id: Mapped[int] = mapped_column(ForeignKey("leads.id", ondelete="CASCADE"), index=True)
     channel: Mapped[str] = mapped_column(String(40), default="whatsapp")
+    whatsapp_session_id: Mapped[int | None] = mapped_column(ForeignKey("whatsapp_sessions.id", ondelete="SET NULL"), index=True)
     external_chat_id: Mapped[str | None] = mapped_column(String(255))
     temperature: Mapped[str] = mapped_column(String(20), default="cold", index=True)
     stage: Mapped[str] = mapped_column(String(40), default="new", index=True)
@@ -85,8 +119,17 @@ class Conversation(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 
     lead: Mapped[Lead] = relationship(back_populates="conversations")
+    whatsapp_session: Mapped[WhatsappSession | None] = relationship(back_populates="conversations")
     messages: Mapped[list[Message]] = relationship(back_populates="conversation", cascade="all, delete-orphan")
     tasks: Mapped[list[AgentTask]] = relationship(back_populates="conversation")
+
+    @property
+    def whatsapp_session_name(self) -> str | None:
+        return self.whatsapp_session.name if self.whatsapp_session else None
+
+    @property
+    def whatsapp_session_phone_number(self) -> str | None:
+        return self.whatsapp_session.phone_number if self.whatsapp_session else None
 
 
 class Message(Base):

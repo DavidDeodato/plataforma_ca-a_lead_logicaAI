@@ -8,15 +8,18 @@ from app.core.config import get_settings
 
 
 class WasenderClient:
-    def __init__(self) -> None:
+    def __init__(self, *, api_key: str | None = None, api_base_url: str | None = None) -> None:
         self.settings = get_settings()
+        self.api_key = api_key
+        self.api_base_url = api_base_url or self.settings.wasender_api_base_url
         self.timeout = httpx.Timeout(12.0, connect=5.0)
 
     def _headers(self) -> dict[str, str]:
-        if not self.settings.has_wasender_credentials:
+        effective_api_key = self.api_key or self.settings.wasender_api_key
+        if not effective_api_key:
             raise RuntimeError("WASENDER_API_KEY ainda não configurada.")
         return {
-            "Authorization": f"Bearer {self.settings.wasender_api_key}",
+            "Authorization": f"Bearer {effective_api_key}",
             "Content-Type": "application/json",
         }
 
@@ -25,7 +28,7 @@ class WasenderClient:
         try:
             with httpx.Client(timeout=self.timeout) as client:
                 response = client.post(
-                    f"{self.settings.wasender_api_base_url.rstrip('/')}/api/send-message",
+                    f"{self.api_base_url.rstrip('/')}/api/send-message",
                     headers=self._headers(),
                     json=payload,
                 )

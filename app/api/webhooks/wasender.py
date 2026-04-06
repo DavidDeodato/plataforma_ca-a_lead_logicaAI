@@ -9,9 +9,10 @@ from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.core.database import get_db
-from app.db.models import Conversation, Lead, Message, ProspectingCandidate
+from app.db.models import Conversation, Lead, Message, ProspectingCandidate, WhatsappSession
 from app.services.conversation_ops import ConversationOpsService, utcnow
 from app.services.runtime_config import RuntimeConfigService
+from app.services.whatsapp_sessions import WhatsappSessionService
 
 
 router = APIRouter(prefix="/webhooks/wasender", tags=["wasender"])
@@ -24,13 +25,25 @@ async def receive_wasender_webhook(
     x_webhook_signature: str | None = Header(default=None),
 ) -> dict[str, bool]:
     settings = get_settings()
-    if settings.wasender_webhook_secret and x_webhook_signature != settings.wasender_webhook_secret:
+    session_service = WhatsappSessionService()
+    provider_session = session_service.resolve_by_webhook_signature(db, x_webhook_signature)
+    valid_signature = bool(provider_session)
+    session_secret_exists = db.scalar(select(WhatsappSession.id).where(WhatsappSession.webhook_secret.is_not(None)).limit(1))
+    if settings.wasender_webhook_secret and x_webhook_signature == settings.wasender_webhook_secret:
+        valid_signature = True
+    if (settings.wasender_webhook_secret or session_secret_exists) and not valid_signature:
         raise HTTPException(status_code=401, detail="Invalid webhook signature.")
 
     payload = await request.json()
     event = payload.get("event")
 
     if event == "session.status":
+        session_service.attach_status_by_api_key(
+            db,
+            api_key=str(payload.get("data", {}).get("session_id") or "") or None,
+            status=str(payload.get("data", {}).get("status") or "") or None,
+        )
+        db.commit()
         return {"received": True}
 
     if event == "messages.update":
@@ -43,7 +56,7 @@ async def receive_wasender_webhook(
 
     messages = _extract_messages(payload)
     for item in messages:
-        _handle_message_upsert(db=db, item=item)
+        _handle_message_upsert(db=db, item=item, provider_session=provider_session)
     db.commit()
     return {"received": True}
 
@@ -57,7 +70,7 @@ def _extract_messages(payload: dict[str, Any]) -> list[dict[str, Any]]:
     return []
 
 
-def _handle_message_upsert(db: Session, item: dict[str, Any]) -> None:
+def _handle_message_upsert(db: Session, item: dict[str, Any], provider_session: WhatsappSession | None) -> None:
     ops = ConversationOpsService()
     key = item.get("key", {})
     from_me = bool(key.get("fromMe"))
@@ -73,7 +86,12 @@ def _handle_message_upsert(db: Session, item: dict[str, Any]) -> None:
         return
 
     lead = _get_or_create_lead(db=db, sender_phone=sender_phone)
-    conversation = _get_or_create_conversation(db=db, lead=lead, external_chat_id=remote_jid)
+    conversation = _get_or_create_conversation(
+        db=db,
+        lead=lead,
+        external_chat_id=remote_jid,
+        provider_session=provider_session,
+    )
     ops.apply_defaults(db, conversation)
     if from_me:
         reconciled = _reconcile_existing_outbound_message(
@@ -226,8 +244,18 @@ def _get_or_create_lead(db: Session, sender_phone: str | None) -> Lead:
     return lead
 
 
-def _get_or_create_conversation(db: Session, lead: Lead, external_chat_id: str | None) -> Conversation:
-    conversation = db.scalar(select(Conversation).where(Conversation.lead_id == lead.id, Conversation.channel == "whatsapp"))
+def _get_or_create_conversation(
+    db: Session,
+    lead: Lead,
+    external_chat_id: str | None,
+    provider_session: WhatsappSession | None,
+) -> Conversation:
+    stmt = select(Conversation).where(Conversation.lead_id == lead.id, Conversation.channel == "whatsapp")
+    if provider_session:
+        stmt = stmt.where(Conversation.whatsapp_session_id == provider_session.id)
+    else:
+        stmt = stmt.where(Conversation.whatsapp_session_id.is_(None))
+    conversation = db.scalar(stmt)
     if conversation:
         if external_chat_id and not conversation.external_chat_id:
             conversation.external_chat_id = external_chat_id
@@ -236,6 +264,7 @@ def _get_or_create_conversation(db: Session, lead: Lead, external_chat_id: str |
     conversation = Conversation(
         lead_id=lead.id,
         channel="whatsapp",
+        whatsapp_session_id=provider_session.id if provider_session else None,
         external_chat_id=external_chat_id,
         stage="engaged",
         temperature="warm",

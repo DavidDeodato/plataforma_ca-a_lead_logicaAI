@@ -33,6 +33,10 @@ class Settings(BaseSettings):
         default="",
         validation_alias=AliasChoices("WASENDER_API_KEY", "wasender_api_key"),
     )
+    wasender_personal_access_token: str = Field(
+        default="",
+        validation_alias=AliasChoices("WASENDER_PERSONAL_ACCESS_TOKEN", "wasender_personal_access_token"),
+    )
     wasender_webhook_secret: str = Field(
         default="",
         validation_alias=AliasChoices("WASENDER_WEBHOOK_SECRET", "wasender_webhook_secret"),
@@ -85,6 +89,10 @@ class Settings(BaseSettings):
     @property
     def has_wasender_credentials(self) -> bool:
         return bool(self.wasender_api_key)
+
+    @property
+    def has_wasender_management_credentials(self) -> bool:
+        return bool(self.wasender_personal_access_token)
 
     @property
     def has_openai_credentials(self) -> bool:

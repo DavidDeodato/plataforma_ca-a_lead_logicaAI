@@ -10,7 +10,8 @@ from app.api.routes.management import router as management_router
 from app.api.routes.ops import router as ops_router
 from app.api.webhooks.wasender import router as wasender_webhook_router
 from app.core.config import get_settings
-from app.core.database import init_db
+from app.core.database import SessionLocal, init_db
+from app.services.whatsapp_sessions import WhatsappSessionService
 from app.workers.followup_worker import process_pending_tasks
 
 
@@ -29,6 +30,9 @@ def _background_worker_loop(stop_event: Event) -> None:
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     init_db()
+    with SessionLocal() as db:
+        WhatsappSessionService().ensure_env_backed_session(db)
+        db.commit()
     stop_event: Event | None = None
     worker_thread: Thread | None = None
     if "PYTEST_CURRENT_TEST" not in os.environ:
