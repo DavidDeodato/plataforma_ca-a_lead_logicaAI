@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from typing import Any
 from urllib.parse import urlparse
 
 from app.services.firecrawl_client import FirecrawlClient
@@ -24,6 +25,7 @@ class ProspectLead:
     instagram_url: str | None = None
     facebook_url: str | None = None
     phone_number: str | None = None
+    search_reason: str | None = None
     notes: str | None = None
 
 
@@ -32,24 +34,41 @@ class ProspectingService:
         self.firecrawl = FirecrawlClient()
         self.validate_phone_format = validate_phone_format
 
-    def find_leads(self, niche: str, city: str, limit: int = 10) -> list[ProspectLead]:
-        queries = [
-            f'"{niche}" "{city}" whatsapp',
-            f'"{niche}" "{city}" telefone',
-            f'"{niche}" "{city}" contato',
-            f'"{niche}" "{city}" site:instagram.com',
-            f'"{niche}" "{city}" site:facebook.com',
-            f'"{niche}" "{city}"',
-        ]
+    def find_leads(self, niche: str, city: str, limit: int = 10, recipe: dict[str, Any] | None = None) -> list[ProspectLead]:
+        effective_recipe = self._effective_recipe(recipe, limit=limit)
         leads: list[ProspectLead] = []
         seen_keys: set[str] = set()
 
-        per_query_limit = max(12, min(limit * 4, 30))
+        discovery_mode = str(effective_recipe.get("discovery_mode") or "search")
+        if discovery_mode in {"agent", "hybrid"}:
+            try:
+                agent_leads = self._find_leads_via_agent(
+                    niche=niche,
+                    city=city,
+                    recipe=effective_recipe,
+                    limit=limit,
+                )
+                for lead in agent_leads:
+                    if effective_recipe["require_phone"] and not self._has_contact_number(lead):
+                        continue
+                    dedupe_key = self._dedupe_key(lead)
+                    if dedupe_key in seen_keys:
+                        continue
+                    seen_keys.add(dedupe_key)
+                    leads.append(lead)
+                    if len(leads) >= limit:
+                        return leads
+            except Exception:
+                if discovery_mode == "agent" and not effective_recipe.get("fallback_enabled", True):
+                    raise
+
+        queries = self._build_queries(niche=niche, city=city, recipe=effective_recipe)
+        per_query_limit = max(12, min(int(effective_recipe["max_total_results"]) * 2, 40))
         for query in queries:
             results = self.firecrawl.search(query=query, limit=per_query_limit, location="Brazil")
             for result in results:
                 lead = self._build_lead_from_result(result=result, niche=niche, city=city, source_query=query)
-                if not self._has_contact_number(lead):
+                if effective_recipe["require_phone"] and not self._has_contact_number(lead):
                     continue
                 dedupe_key = self._dedupe_key(lead)
                 if dedupe_key in seen_keys:
@@ -96,7 +115,140 @@ class ProspectingService:
             instagram_url=instagram_url,
             facebook_url=facebook_url,
             phone_number=phone_number,
+            search_reason=source_query,
             notes=notes,
+        )
+
+    def _effective_recipe(self, recipe: dict[str, Any] | None, *, limit: int) -> dict[str, Any]:
+        base = {
+            "objective": "",
+            "system_prompt": "",
+            "source_channels": ["google", "instagram", "facebook", "linkedin"],
+            "inclusion_rules": "",
+            "exclusion_rules": "",
+            "minimum_valid_contacts": limit,
+            "max_total_results": max(limit, 10),
+            "search_depth": 2,
+            "require_phone": True,
+            "validate_phone_format": self.validate_phone_format,
+            "discovery_mode": "search",
+            "fallback_enabled": True,
+            "agent_max_credits": None,
+        }
+        if recipe:
+            base.update({key: value for key, value in recipe.items() if value is not None})
+        return base
+
+    def _build_queries(self, *, niche: str, city: str, recipe: dict[str, Any]) -> list[str]:
+        queries: list[str] = []
+        channels = [str(item).lower() for item in recipe.get("source_channels") or []]
+        objective = str(recipe.get("objective") or "").strip()
+        inclusion = str(recipe.get("inclusion_rules") or "").strip()
+
+        base_terms = [
+            f'"{niche}" "{city}" whatsapp',
+            f'"{niche}" "{city}" telefone',
+            f'"{niche}" "{city}" contato',
+            f'"{niche}" "{city}"',
+        ]
+        if "linkedin" in channels or "posts" in channels:
+            base_terms.append(f'"{niche}" "{city}" site:linkedin.com')
+        if "instagram" in channels:
+            base_terms.append(f'"{niche}" "{city}" site:instagram.com')
+        if "facebook" in channels:
+            base_terms.append(f'"{niche}" "{city}" site:facebook.com')
+        if objective:
+            base_terms.append(f'"{objective}" "{city}" telefone')
+            base_terms.append(f'"{objective}" "{city}" whatsapp')
+        if inclusion:
+            base_terms.append(f'"{niche}" "{city}" "{inclusion}"')
+
+        for query in base_terms:
+            normalized = " ".join(query.split())
+            if normalized not in queries:
+                queries.append(normalized)
+        return queries
+
+    def _find_leads_via_agent(
+        self,
+        *,
+        niche: str,
+        city: str,
+        recipe: dict[str, Any],
+        limit: int,
+    ) -> list[ProspectLead]:
+        minimum_valid_contacts = int(recipe.get("minimum_valid_contacts") or limit)
+        schema = {
+            "type": "object",
+            "properties": {
+                "leads": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "business_name": {"type": "string"},
+                            "source_url": {"type": "string"},
+                            "website": {"type": ["string", "null"]},
+                            "instagram_url": {"type": ["string", "null"]},
+                            "facebook_url": {"type": ["string", "null"]},
+                            "phone_number": {"type": ["string", "null"]},
+                            "reason": {"type": "string"},
+                        },
+                        "required": ["business_name", "source_url", "phone_number", "reason"],
+                    },
+                }
+            },
+            "required": ["leads"],
+        }
+        prompt = self._build_agent_prompt(niche=niche, city=city, recipe=recipe, minimum_valid_contacts=minimum_valid_contacts)
+        job_id = self.firecrawl.start_agent(
+            prompt=prompt,
+            schema=schema,
+            strict_constrain_to_urls=False,
+            max_credits=recipe.get("agent_max_credits"),
+        )
+        data = self.firecrawl.wait_for_agent(job_id, timeout_seconds=90)
+        items = data.get("leads") if isinstance(data, dict) else None
+        if not isinstance(items, list):
+            return []
+
+        leads: list[ProspectLead] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            phone_number = self.sanitize_phone(str(item.get("phone_number")) if item.get("phone_number") else None)
+            lead = ProspectLead(
+                business_name=str(item.get("business_name") or f"Lead {niche.title()}"),
+                niche=niche,
+                city=city,
+                source_url=str(item.get("source_url")) if item.get("source_url") else None,
+                source_query="agentic_recipe",
+                source_platform=self._detect_platform(str(item.get("source_url")) if item.get("source_url") else None),
+                website=str(item.get("website")) if item.get("website") else None,
+                instagram_url=str(item.get("instagram_url")) if item.get("instagram_url") else None,
+                facebook_url=str(item.get("facebook_url")) if item.get("facebook_url") else None,
+                phone_number=phone_number,
+                search_reason=str(item.get("reason") or ""),
+                notes=str(item.get("reason") or ""),
+            )
+            leads.append(lead)
+        return leads
+
+    @staticmethod
+    def _build_agent_prompt(*, niche: str, city: str, recipe: dict[str, Any], minimum_valid_contacts: int) -> str:
+        channels = ", ".join(recipe.get("source_channels") or [])
+        objective = recipe.get("objective") or f"achar {niche} em {city}"
+        inclusion = recipe.get("inclusion_rules") or ""
+        exclusion = recipe.get("exclusion_rules") or ""
+        system_prompt = recipe.get("system_prompt") or ""
+        return (
+            f"Objetivo da pesquisa: {objective}. "
+            f"Nicho alvo: {niche}. Cidade/regiao alvo: {city}. "
+            f"Fontes priorizadas: {channels or 'busca web aberta'}. "
+            f"Critérios de inclusão: {inclusion}. Critérios de exclusão: {exclusion}. "
+            f"Continue procurando até conseguir pelo menos {minimum_valid_contacts} leads com telefone ou WhatsApp utilizável. "
+            "Se um candidato parecer bom mas estiver sem telefone, continue a busca até achar contato válido ou substitua por outro lead melhor. "
+            f"Instrução adicional da recipe: {system_prompt}."
         )
 
     @staticmethod

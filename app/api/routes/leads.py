@@ -11,6 +11,7 @@ from app.core.database import get_db
 from app.db.models import AgentTask, Conversation, Lead, LeadResearch, Message, QualifiedLead
 from app.db.schemas import ConversationRead, LeadCreate, LeadRead, ProspectingRequest, QualificationRead
 from app.services.conversation_agent import ConversationAgentService
+from app.services.conversion_kpis import apply_fit_score_to_record, mark_contact_started
 from app.services.conversation_ops import ConversationOpsService
 from app.services.enrichment import EnrichmentService
 from app.services.prospecting import ProspectLead, ProspectingService
@@ -30,6 +31,9 @@ def list_leads(db: Session = Depends(get_db)) -> list[Lead]:
 @router.post("/leads", response_model=LeadRead)
 def create_lead(payload: LeadCreate, db: Session = Depends(get_db)) -> Lead:
     lead = Lead(**payload.model_dump())
+    if not lead.source_origin:
+        lead.source_origin = "manual"
+    apply_fit_score_to_record(lead)
     db.add(lead)
     db.commit()
     db.refresh(lead)
@@ -121,6 +125,7 @@ def _upsert_lead(db: Session, prospect: ProspectLead) -> Lead:
             business_name=prospect.business_name,
             niche=prospect.niche,
             city=prospect.city,
+            source_origin="prospecting",
         )
         db.add(lead)
 
@@ -133,6 +138,7 @@ def _upsert_lead(db: Session, prospect: ProspectLead) -> Lead:
     lead.source_query = prospect.source_query
     lead.source_platform = prospect.source_platform
     lead.notes = prospect.notes or lead.notes
+    apply_fit_score_to_record(lead)
     return lead
 
 
@@ -155,6 +161,7 @@ def _hydrate_lead_from_research(lead: Lead, research_payload: dict) -> None:
     lead.instagram_url = lead.instagram_url or research_payload.get("instagram_url")
     lead.phone_number = lead.phone_number or research_payload.get("phone_number")
     lead.whatsapp_number = lead.whatsapp_number or research_payload.get("phone_number")
+    apply_fit_score_to_record(lead, research_payload)
 
 
 def _latest_research_payload(lead: Lead) -> dict:
@@ -226,15 +233,17 @@ def _start_outreach_internal(
     conversation = _get_or_create_conversation(db=db, lead=lead)
     ops.apply_defaults(db, conversation)
     agent = ConversationAgentService()
-    text = agent.draft_first_message(
+    first_message_payload = agent.draft_first_message_payload(
+        db=db,
         lead=lead,
         research=research_payload,
-        custom_instruction=runtime_service.build_sales_instruction(db),
+        custom_instruction=runtime_service.build_sales_instruction(db, lead=lead, conversation=conversation),
     )
+    text = str(first_message_payload.get("message") or "")
 
     conversation.stage = "contacted"
     conversation.temperature = conversation.temperature or "cold"
-    lead.status = "contacted"
+    mark_contact_started(lead)
     sent = ops.send_outbound_message(
         db=db,
         lead=lead,
@@ -243,6 +252,8 @@ def _start_outreach_internal(
         sender="agent",
         author_role="agent",
         queue_context=queue_context,
+        prompt_phase=str(first_message_payload.get("_prompt_phase") or "outreach"),
+        instruction_snapshot=first_message_payload.get("_instruction_snapshot"),
     )
     _ensure_followup_task(db=db, lead=lead, research=research_payload)
     return conversation, sent

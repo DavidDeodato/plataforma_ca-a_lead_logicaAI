@@ -20,6 +20,17 @@ class Lead(Base):
     niche: Mapped[str] = mapped_column(String(120), nullable=False, index=True)
     city: Mapped[str] = mapped_column(String(120), nullable=False, index=True)
     campaign_id: Mapped[int | None] = mapped_column(ForeignKey("campaigns.id", ondelete="SET NULL"), index=True)
+    offer_product_id: Mapped[int | None] = mapped_column(ForeignKey("offer_products.id", ondelete="SET NULL"), index=True)
+    agent_strategy_id: Mapped[int | None] = mapped_column(ForeignKey("agent_strategies.id", ondelete="SET NULL"), index=True)
+    prospecting_recipe_id: Mapped[int | None] = mapped_column(ForeignKey("prospecting_recipes.id", ondelete="SET NULL"), index=True)
+    prospecting_prompt_category_id: Mapped[int | None] = mapped_column(
+        ForeignKey("prospecting_prompt_categories.id", ondelete="SET NULL"),
+        index=True,
+    )
+    prospecting_prompt_id: Mapped[int | None] = mapped_column(
+        ForeignKey("prospecting_prompts.id", ondelete="SET NULL"),
+        index=True,
+    )
     phone_number: Mapped[str | None] = mapped_column(String(40), unique=True)
     whatsapp_number: Mapped[str | None] = mapped_column(String(40))
     website: Mapped[str | None] = mapped_column(String(500))
@@ -29,6 +40,31 @@ class Lead(Base):
     source_query: Mapped[str | None] = mapped_column(String(255))
     source_platform: Mapped[str | None] = mapped_column(String(80))
     status: Mapped[str] = mapped_column(String(40), default="new", index=True)
+    funnel_stage: Mapped[str] = mapped_column(String(40), default="captured", index=True)
+    fit_score: Mapped[float | None] = mapped_column(Float, index=True)
+    fit_label: Mapped[str | None] = mapped_column(String(20), index=True)
+    fit_reasons_json: Mapped[dict | None] = mapped_column("fit_reasons", JSON)
+    fit_scored_at: Mapped[datetime | None] = mapped_column(DateTime)
+    first_contacted_at: Mapped[datetime | None] = mapped_column(DateTime, index=True)
+    first_replied_at: Mapped[datetime | None] = mapped_column(DateTime, index=True)
+    positive_reply_detected: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    positive_reply_at: Mapped[datetime | None] = mapped_column(DateTime, index=True)
+    pain_status: Mapped[str] = mapped_column(String(30), default="unknown", index=True)
+    pain_confirmed_at: Mapped[datetime | None] = mapped_column(DateTime, index=True)
+    intent_status: Mapped[str] = mapped_column(String(30), default="unknown", index=True)
+    fit_confirmed_at: Mapped[datetime | None] = mapped_column(DateTime, index=True)
+    authority_status: Mapped[str] = mapped_column(String(30), default="unknown", index=True)
+    urgency_status: Mapped[str] = mapped_column(String(30), default="unknown", index=True)
+    objection_status: Mapped[str] = mapped_column(String(40), default="none", index=True)
+    meeting_status: Mapped[str] = mapped_column(String(30), default="not_offered", index=True)
+    meeting_offered_at: Mapped[datetime | None] = mapped_column(DateTime, index=True)
+    meeting_booked_at: Mapped[datetime | None] = mapped_column(DateTime, index=True)
+    qualified_opportunity_at: Mapped[datetime | None] = mapped_column(DateTime, index=True)
+    closed_won_at: Mapped[datetime | None] = mapped_column(DateTime, index=True)
+    closed_lost_at: Mapped[datetime | None] = mapped_column(DateTime, index=True)
+    last_signal_at: Mapped[datetime | None] = mapped_column(DateTime, index=True)
+    source_origin: Mapped[str] = mapped_column(String(40), default="manual", index=True)
+    inbound_unverified: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     notes: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
@@ -38,6 +74,11 @@ class Lead(Base):
     qualified_lead: Mapped[QualifiedLead | None] = relationship(back_populates="lead", cascade="all, delete-orphan")
     tasks: Mapped[list[AgentTask]] = relationship(back_populates="lead", cascade="all, delete-orphan")
     campaign: Mapped[Campaign | None] = relationship(back_populates="leads")
+    offer_product: Mapped[OfferProduct | None] = relationship(back_populates="leads")
+    agent_strategy: Mapped[AgentStrategy | None] = relationship(back_populates="leads")
+    prospecting_recipe: Mapped[ProspectingRecipe | None] = relationship(back_populates="leads")
+    prospecting_prompt_category: Mapped[ProspectingPromptCategory | None] = relationship(back_populates="leads")
+    prospecting_prompt: Mapped[ProspectingPrompt | None] = relationship(back_populates="leads")
 
 
 class WhatsappSession(Base):
@@ -56,6 +97,7 @@ class WhatsappSession(Base):
     account_protection: Mapped[bool] = mapped_column(Boolean, default=True)
     log_messages: Mapped[bool] = mapped_column(Boolean, default=True)
     read_incoming_messages: Mapped[bool] = mapped_column(Boolean, default=False)
+    outbound_cooldown_seconds: Mapped[int | None] = mapped_column(Integer)
     source: Mapped[str] = mapped_column(String(40), default="manual", index=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     last_synced_at: Mapped[datetime | None] = mapped_column(DateTime)
@@ -143,6 +185,8 @@ class Message(Base):
     content: Mapped[str] = mapped_column(Text, default="")
     status: Mapped[str | None] = mapped_column(String(40), index=True)
     author_role: Mapped[str | None] = mapped_column(String(40), index=True)
+    prompt_phase: Mapped[str | None] = mapped_column(String(40), index=True)
+    instruction_snapshot_json: Mapped[dict | None] = mapped_column("instruction_snapshot", JSON)
     metadata_json: Mapped[dict | None] = mapped_column("metadata", JSON)
     sent_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
@@ -193,6 +237,143 @@ class AppSetting(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 
 
+class OfferProduct(Base):
+    __tablename__ = "offer_products"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(180), unique=True, index=True)
+    category: Mapped[str | None] = mapped_column(String(120), index=True)
+    summary: Mapped[str] = mapped_column(Text, default="")
+    objective: Mapped[str] = mapped_column(Text, default="")
+    target_customer: Mapped[str | None] = mapped_column(Text)
+    pains: Mapped[str | None] = mapped_column(Text)
+    differentiators: Mapped[str | None] = mapped_column(Text)
+    proof_points: Mapped[str | None] = mapped_column(Text)
+    cta_primary: Mapped[str | None] = mapped_column(Text)
+    allowed_claims: Mapped[str | None] = mapped_column(Text)
+    forbidden_claims: Mapped[str | None] = mapped_column(Text)
+    active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+    campaigns: Mapped[list[Campaign]] = relationship(back_populates="offer_product")
+    leads: Mapped[list[Lead]] = relationship(back_populates="offer_product")
+
+
+class AgentStrategy(Base):
+    __tablename__ = "agent_strategies"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(180), unique=True, index=True)
+    persona: Mapped[str | None] = mapped_column(Text)
+    primary_goal: Mapped[str] = mapped_column(Text, default="")
+    tone: Mapped[str | None] = mapped_column(String(180))
+    opening_strategy: Mapped[str | None] = mapped_column(Text)
+    qualification_strategy: Mapped[str | None] = mapped_column(Text)
+    objection_strategy: Mapped[str | None] = mapped_column(Text)
+    follow_up_strategy: Mapped[str | None] = mapped_column(Text)
+    handoff_strategy: Mapped[str | None] = mapped_column(Text)
+    guardrails: Mapped[str | None] = mapped_column(Text)
+    active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+    prompt_templates: Mapped[list[PromptTemplate]] = relationship(back_populates="agent_strategy", cascade="all, delete-orphan")
+    campaigns: Mapped[list[Campaign]] = relationship(back_populates="agent_strategy")
+    leads: Mapped[list[Lead]] = relationship(back_populates="agent_strategy")
+
+
+class PromptTemplate(Base):
+    __tablename__ = "prompt_templates"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    agent_strategy_id: Mapped[int | None] = mapped_column(ForeignKey("agent_strategies.id", ondelete="SET NULL"), index=True)
+    name: Mapped[str] = mapped_column(String(180), unique=True, index=True)
+    phase: Mapped[str] = mapped_column(String(40), index=True)
+    channel: Mapped[str] = mapped_column(String(40), default="whatsapp", index=True)
+    system_prompt: Mapped[str] = mapped_column(Text, default="")
+    instructions: Mapped[str | None] = mapped_column(Text)
+    output_contract: Mapped[str | None] = mapped_column(Text)
+    active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+    agent_strategy: Mapped[AgentStrategy | None] = relationship(back_populates="prompt_templates")
+
+
+class ProspectingRecipe(Base):
+    __tablename__ = "prospecting_recipes"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(180), unique=True, index=True)
+    objective: Mapped[str] = mapped_column(Text, default="")
+    system_prompt: Mapped[str] = mapped_column(Text, default="")
+    source_channels: Mapped[list[str] | None] = mapped_column(JSON)
+    inclusion_rules: Mapped[str | None] = mapped_column(Text)
+    exclusion_rules: Mapped[str | None] = mapped_column(Text)
+    minimum_valid_contacts: Mapped[int] = mapped_column(Integer, default=10)
+    max_total_results: Mapped[int] = mapped_column(Integer, default=25)
+    search_depth: Mapped[int] = mapped_column(Integer, default=2)
+    require_phone: Mapped[bool] = mapped_column(Boolean, default=True)
+    validate_phone_format: Mapped[bool] = mapped_column(Boolean, default=True)
+    discovery_mode: Mapped[str] = mapped_column(String(40), default="hybrid", index=True)
+    fallback_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    scoring_guidance: Mapped[str | None] = mapped_column(Text)
+    assistant_notes: Mapped[str | None] = mapped_column(Text)
+    schema_fields: Mapped[dict | None] = mapped_column(JSON)
+    agent_max_credits: Mapped[int | None] = mapped_column(Integer)
+    active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+    campaigns: Mapped[list[Campaign]] = relationship(back_populates="prospecting_recipe")
+    batches: Mapped[list[ProspectingBatch]] = relationship(back_populates="recipe")
+    leads: Mapped[list[Lead]] = relationship(back_populates="prospecting_recipe")
+
+
+class ProspectingPromptCategory(Base):
+    __tablename__ = "prospecting_prompt_categories"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(180), unique=True, index=True)
+    description: Mapped[str | None] = mapped_column(Text)
+    offer_context: Mapped[str | None] = mapped_column(Text)
+    target_niche: Mapped[str | None] = mapped_column(String(120), index=True)
+    active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+    prompts: Mapped[list[ProspectingPrompt]] = relationship(back_populates="category", cascade="all, delete-orphan")
+    leads: Mapped[list[Lead]] = relationship(back_populates="prospecting_prompt_category")
+
+
+class ProspectingPrompt(Base):
+    __tablename__ = "prospecting_prompts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    category_id: Mapped[int | None] = mapped_column(
+        ForeignKey("prospecting_prompt_categories.id", ondelete="SET NULL"),
+        index=True,
+    )
+    name: Mapped[str] = mapped_column(String(180), index=True)
+    prompt_text: Mapped[str] = mapped_column(Text, default="")
+    objective: Mapped[str | None] = mapped_column(Text)
+    source_channels: Mapped[list[str] | None] = mapped_column(JSON)
+    discovery_mode: Mapped[str] = mapped_column(String(40), default="hybrid", index=True)
+    minimum_valid_contacts: Mapped[int] = mapped_column(Integer, default=10)
+    require_phone: Mapped[bool] = mapped_column(Boolean, default=True)
+    fallback_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    search_depth: Mapped[int] = mapped_column(Integer, default=2)
+    agent_max_credits: Mapped[int | None] = mapped_column(Integer)
+    notes: Mapped[str | None] = mapped_column(Text)
+    active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+    category: Mapped[ProspectingPromptCategory | None] = relationship(back_populates="prompts")
+    leads: Mapped[list[Lead]] = relationship(back_populates="prospecting_prompt")
+
+
 class Campaign(Base):
     __tablename__ = "campaigns"
 
@@ -201,6 +382,9 @@ class Campaign(Base):
     status: Mapped[str] = mapped_column(String(40), default="draft", index=True)
     niche: Mapped[str] = mapped_column(String(120), index=True)
     city: Mapped[str] = mapped_column(String(120), index=True)
+    offer_product_id: Mapped[int | None] = mapped_column(ForeignKey("offer_products.id", ondelete="SET NULL"), index=True)
+    agent_strategy_id: Mapped[int | None] = mapped_column(ForeignKey("agent_strategies.id", ondelete="SET NULL"), index=True)
+    prospecting_recipe_id: Mapped[int | None] = mapped_column(ForeignKey("prospecting_recipes.id", ondelete="SET NULL"), index=True)
     offer_name: Mapped[str] = mapped_column(String(160), default="landing page")
     offer_summary: Mapped[str] = mapped_column(Text, default="")
     offer_goal: Mapped[str] = mapped_column(Text, default="")
@@ -216,6 +400,9 @@ class Campaign(Base):
 
     leads: Mapped[list[Lead]] = relationship(back_populates="campaign")
     prospecting_batches: Mapped[list[ProspectingBatch]] = relationship(back_populates="campaign", cascade="all, delete-orphan")
+    offer_product: Mapped[OfferProduct | None] = relationship(back_populates="campaigns")
+    agent_strategy: Mapped[AgentStrategy | None] = relationship(back_populates="campaigns")
+    prospecting_recipe: Mapped[ProspectingRecipe | None] = relationship(back_populates="campaigns")
 
 
 class Playbook(Base):
@@ -251,15 +438,25 @@ class ProspectingBatch(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     campaign_id: Mapped[int | None] = mapped_column(ForeignKey("campaigns.id", ondelete="SET NULL"), index=True)
+    recipe_id: Mapped[int | None] = mapped_column(ForeignKey("prospecting_recipes.id", ondelete="SET NULL"), index=True)
+    prompt_category_id: Mapped[int | None] = mapped_column(
+        ForeignKey("prospecting_prompt_categories.id", ondelete="SET NULL"),
+        index=True,
+    )
+    prompt_id: Mapped[int | None] = mapped_column(ForeignKey("prospecting_prompts.id", ondelete="SET NULL"), index=True)
     niche: Mapped[str] = mapped_column(String(120), index=True)
     city: Mapped[str] = mapped_column(String(120), index=True)
     limit: Mapped[int] = mapped_column(Integer, default=10)
     enrich: Mapped[bool] = mapped_column(Boolean, default=True)
+    recipe_snapshot_json: Mapped[dict | None] = mapped_column("recipe_snapshot", JSON)
+    prompt_snapshot_json: Mapped[dict | None] = mapped_column("prompt_snapshot", JSON)
+    search_metrics_json: Mapped[dict | None] = mapped_column("search_metrics", JSON)
     status: Mapped[str] = mapped_column(String(40), default="pending_review", index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 
     campaign: Mapped[Campaign | None] = relationship(back_populates="prospecting_batches")
+    recipe: Mapped[ProspectingRecipe | None] = relationship(back_populates="batches")
     candidates: Mapped[list[ProspectingCandidate]] = relationship(back_populates="batch", cascade="all, delete-orphan")
 
 
@@ -278,6 +475,8 @@ class ProspectingCandidate(Base):
     instagram_url: Mapped[str | None] = mapped_column(String(500))
     facebook_url: Mapped[str | None] = mapped_column(String(500))
     phone_number: Mapped[str | None] = mapped_column(String(40))
+    prospecting_prompt_category_id: Mapped[int | None] = mapped_column(Integer, index=True)
+    prospecting_prompt_id: Mapped[int | None] = mapped_column(Integer, index=True)
     lead_id: Mapped[int | None] = mapped_column(Integer, index=True)
     conversation_id: Mapped[int | None] = mapped_column(Integer, index=True)
     outreach_external_message_id: Mapped[str | None] = mapped_column(String(255), index=True)
@@ -285,6 +484,11 @@ class ProspectingCandidate(Base):
     delivery_note: Mapped[str | None] = mapped_column(Text)
     existing_lead_id: Mapped[int | None] = mapped_column(Integer, index=True)
     existing_lead_status: Mapped[str | None] = mapped_column(String(40))
+    fit_score: Mapped[float | None] = mapped_column(Float, index=True)
+    fit_label: Mapped[str | None] = mapped_column(String(20), index=True)
+    fit_reasons_json: Mapped[dict | None] = mapped_column("fit_reasons", JSON)
+    fit_scored_at: Mapped[datetime | None] = mapped_column(DateTime)
+    search_reason: Mapped[str | None] = mapped_column(Text)
     notes: Mapped[str | None] = mapped_column(Text)
     research_summary: Mapped[str | None] = mapped_column(Text)
     research_payload: Mapped[dict | None] = mapped_column(JSON)

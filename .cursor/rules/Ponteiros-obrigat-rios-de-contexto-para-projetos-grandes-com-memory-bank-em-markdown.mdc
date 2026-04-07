@@ -1,0 +1,217 @@
+---
+alwaysApply: true
+---
+
+alwaysApply: true
+---
+
+# Regra de ponteiros obrigatórios de contexto
+
+## Objetivo
+
+Esta regra existe para garantir que o agente consulte, use e atualize a memória persistente do projeto de forma disciplinada.
+
+A ideia central é simples:
+
+**o contexto mais importante do projeto precisa morar em arquivos curtos e consultáveis, e não só na conversa.**
+
+Assim, mesmo em projetos longos, o agente consegue retomar trabalho sem se perder.
+
+## Princípio de funcionamento
+
+Sempre que existir um sistema de arquivos de contexto do projeto, o agente deve tratá-lo como fonte prioritária de continuidade operacional.
+
+Esses arquivos funcionam como ponteiros para conhecimento persistente.
+
+O agente deve ler apenas o necessário para a tarefa atual, mas deve sempre passar primeiro pelos ponteiros corretos antes de executar trabalho substancial.
+
+## Estrutura recomendada de ponteiros
+
+Se o projeto usar memory bank em markdown, a estrutura ideal é algo como:
+
+- `00_POINTERS.md`
+- `01_ESTADO_ATUAL.md`
+- `02_CRONOGRAMA_SPRINTS.md`
+- `03_DECISOES_GLOBAIS.md`
+- `04_OPEN_QUESTIONS.md`
+- `05_PROXIMOS_PASSOS.md`
+- `modulos/<modulo>.md`
+
+Os nomes podem variar, mas a lógica deve permanecer:
+
+- um arquivo de roteamento
+- um snapshot curto do estado
+- um backlog macro
+- um arquivo de decisões
+- um arquivo de dúvidas abertas
+- um arquivo de próximos passos
+- memórias por módulo ou frente de trabalho
+
+## Ordem obrigatória de leitura
+
+### Caso 1: retomada geral do projeto
+Ler:
+- ponteiros
+- estado atual
+- próximos passos
+
+### Caso 2: trabalho em um módulo específico
+Ler:
+- estado atual
+- memória do módulo correspondente
+
+Se houver ambiguidade:
+- decisões globais
+- dúvidas abertas
+- próximos passos
+
+### Caso 3: dúvida sobre regra, fonte, escopo ou decisão antiga
+Ler:
+- decisões globais
+- dúvidas abertas
+- memória do módulo afetado
+
+### Caso 4: agente iterando demais ou começando a se perder
+Reler:
+- ponteiros
+- estado atual
+- próximos passos
+- memória do módulo ativo
+
+## Regras de uso
+
+### 1. Não confiar só na conversa
+Se houver arquivos de contexto do projeto, o agente não deve depender apenas:
+- da mensagem atual
+- da memória curta da sessão
+- de resumos informais
+- do que “parece que já foi decidido”
+
+Ele deve revalidar pelos ponteiros certos.
+
+### 2. Ler de forma econômica, mas suficiente
+O agente não precisa reler tudo toda vez.
+Mas precisa reler o suficiente para:
+- não se perder
+- não contradizer decisão já tomada
+- não repetir investigação já resolvida
+- não reabrir discussão já encerrada sem motivo
+
+### 3. Atualizar os arquivos certos, não qualquer arquivo
+Após avanço relevante, o agente deve atualizar os ponteiros adequados.
+
+Exemplos:
+- progresso geral: `01_ESTADO_ATUAL.md`
+- nova prioridade operacional: `05_PROXIMOS_PASSOS.md`
+- nova dúvida real: `04_OPEN_QUESTIONS.md`
+- nova decisão validada: `03_DECISOES_GLOBAIS.md`
+- descoberta especializada: `modulos/<modulo>.md`
+- histórico mais longo e consolidado: memory bank principal do projeto
+
+### 4. O que merece atualização
+Atualizar quando houver:
+- descoberta estrutural
+- fonte real confirmada
+- mudança relevante de entendimento
+- risco importante
+- bloqueio novo
+- decisão tomada
+- novo artefato relevante criado
+- mudança no próximo passo do projeto
+
+### 5. O que não merece atualização
+Não poluir os arquivos com:
+- micro tentativas sem consequência
+- exploração descartada sem impacto
+- outputs triviais
+- repetições do que já está documentado
+
+## Conteúdo esperado de cada ponteiro
+
+### `00_POINTERS`
+Deve responder:
+- onde está o estado oficial
+- qual sprint está ativa
+- qual módulo está prioritário
+- para onde ler dependendo do tipo de tarefa
+
+### `01_ESTADO_ATUAL`
+Deve responder:
+- onde paramos
+- o que já foi concluído
+- o que está em andamento lógico
+- qual é o próximo passo natural
+- quais riscos seguem ativos
+
+### `02_CRONOGRAMA_SPRINTS`
+Deve responder:
+- quais sprints existem
+- escopo de cada uma
+- sequência macro de execução
+
+### `03_DECISOES_GLOBAIS`
+Deve responder:
+- quais decisões já foram tomadas
+- o que está congelado
+- o que não deve mais ser reaberto sem evidência forte
+
+### `04_OPEN_QUESTIONS`
+Deve responder:
+- quais dúvidas continuam abertas
+- qual o impacto de cada dúvida
+- se já existe evidência parcial
+
+### `05_PROXIMOS_PASSOS`
+Deve responder:
+- fila operacional curta
+- prioridade atual
+- o que fazer agora
+- o que não fazer ainda
+
+### `modulos/<modulo>`
+Deve responder:
+- objetivo do módulo
+- escopo
+- estado atual
+- fonte real já localizada
+- gaps restantes
+- riscos
+- próximo passo do módulo
+
+## Comportamento obrigatório ao concluir tarefas
+
+Ao concluir uma tarefa relevante, o agente deve verificar:
+1. isso muda o estado atual do projeto?
+2. isso muda o próximo passo?
+3. isso resolve ou altera uma dúvida aberta?
+4. isso cria ou muda conhecimento de um módulo?
+5. isso merece registro no memory bank longo?
+
+Se a resposta for sim para qualquer item, o agente deve atualizar os arquivos correspondentes.
+
+## Regra de segurança
+
+Se o agente perceber conflito entre:
+- conversa atual
+- memória curta
+- código
+- workbook
+- documentação
+- ponteiros do projeto
+
+ele não deve escolher no chute.
+
+Ele deve:
+- investigar
+- reancorar
+- registrar o que foi confirmado
+- manter explícito o que continua em aberto
+
+## Regra final
+
+Os ponteiros não são documentação decorativa.
+Eles são parte do mecanismo de continuidade do projeto.
+
+Se existirem, devem ser lidos.
+Se mudarem o estado do projeto, devem ser atualizados.
+Se o agente estiver se per

@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from app.core.config import get_settings
 from app.core.database import get_db
 from app.db.models import Conversation, Lead, Message, ProspectingCandidate, WhatsappSession
+from app.services.conversion_kpis import apply_fit_score_to_record, apply_inbound_signal
 from app.services.conversation_ops import ConversationOpsService, utcnow
 from app.services.runtime_config import RuntimeConfigService
 from app.services.whatsapp_sessions import WhatsappSessionService
@@ -85,7 +86,10 @@ def _handle_message_upsert(db: Session, item: dict[str, Any], provider_session: 
     if existing:
         return
 
-    lead = _get_or_create_lead(db=db, sender_phone=sender_phone)
+    runtime = RuntimeConfigService().get_runtime_config(db)
+    lead, created_now = _get_or_create_lead(db=db, sender_phone=sender_phone)
+    if created_now and not bool(runtime.get("persist_unknown_inbound", True)):
+        return
     conversation = _get_or_create_conversation(
         db=db,
         lead=lead,
@@ -125,12 +129,14 @@ def _handle_message_upsert(db: Session, item: dict[str, Any], provider_session: 
 
     conversation.last_inbound_at = conversation.last_message_at
     conversation.unread_count += 1
-    lead.status = "replied"
+    if lead.status not in {"qualified", "do_not_contact"}:
+        lead.status = "replied"
+    apply_inbound_signal(lead, text=text)
     research_payload = {}
     if lead.research_entries:
         research_payload = sorted(lead.research_entries, key=lambda row: row.created_at)[-1].structured_data or {}
 
-    if not ops.can_auto_reply(db, conversation):
+    if not ops.can_auto_reply(db, conversation, lead=lead):
         return
 
     ops.schedule_delayed_auto_reply(
@@ -222,13 +228,13 @@ def _handle_message_status_update(db: Session, payload: dict[str, Any]) -> None:
             candidate.delivery_note = f"Status atualizado pelo provedor para {message.status}."
 
 
-def _get_or_create_lead(db: Session, sender_phone: str | None) -> Lead:
+def _get_or_create_lead(db: Session, sender_phone: str | None) -> tuple[Lead, bool]:
     normalized_phone = _normalize_phone(sender_phone)
     lead = None
     if normalized_phone:
         lead = db.scalar(select(Lead).where(Lead.phone_number == normalized_phone))
     if lead:
-        return lead
+        return lead, False
 
     runtime = RuntimeConfigService().get_runtime_config(db)
     lead = Lead(
@@ -238,10 +244,13 @@ def _get_or_create_lead(db: Session, sender_phone: str | None) -> Lead:
         phone_number=normalized_phone,
         whatsapp_number=normalized_phone,
         status="inbound",
+        source_origin="inbound_unknown",
+        inbound_unverified=True,
     )
+    apply_fit_score_to_record(lead)
     db.add(lead)
     db.flush()
-    return lead
+    return lead, True
 
 
 def _get_or_create_conversation(

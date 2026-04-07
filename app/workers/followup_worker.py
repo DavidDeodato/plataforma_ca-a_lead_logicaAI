@@ -10,6 +10,7 @@ from app.db.models import AgentTask, Conversation, Lead, Message, ProspectingCan
 from app.services.conversation_agent import ConversationAgentService
 from app.services.conversation_ops import ConversationOpsService
 from app.services.runtime_config import RuntimeConfigService
+from app.services.whatsapp_sessions import WhatsappSessionService
 
 
 def utcnow() -> datetime:
@@ -44,6 +45,7 @@ def process_pending_tasks() -> None:
         runtime_service = RuntimeConfigService()
         runtime = runtime_service.get_runtime_config(db)
         ops = ConversationOpsService()
+        session_service = WhatsappSessionService()
         tasks = list(
             db.scalars(
                 select(AgentTask).where(
@@ -65,9 +67,11 @@ def process_pending_tasks() -> None:
             if task.conversation_id:
                 conversation = db.get(Conversation, task.conversation_id)
             if not conversation:
-                conversation = db.scalar(
-                    select(Conversation).where(Conversation.lead_id == lead.id, Conversation.channel == "whatsapp")
-                )
+                active_session = session_service.get_active_session(db)
+                stmt = select(Conversation).where(Conversation.lead_id == lead.id, Conversation.channel == "whatsapp")
+                if active_session:
+                    stmt = stmt.where(Conversation.whatsapp_session_id == active_session.id)
+                conversation = db.scalar(stmt.order_by(Conversation.last_message_at.desc()))
             if not conversation:
                 task.status = "cancelled"
                 task.last_result = "Sem conversa para processamento."
@@ -88,6 +92,12 @@ def process_pending_tasks() -> None:
                     continue
 
                 queue_origin = str(payload.get("queue_origin") or "")
+                if message.author_role == "agent" and (conversation.manual_mode or conversation.automation_paused):
+                    task.status = "cancelled"
+                    task.last_result = "Mensagem agent cancelada porque a conversa entrou em controle manual."
+                    message.status = "cancelled"
+                    _mark_candidate_status(db, task, "contact_failed")
+                    continue
                 if queue_origin in {"auto_reply", "follow_up"} and (conversation.manual_mode or conversation.automation_paused):
                     task.status = "cancelled"
                     task.last_result = "Envio automático cancelado porque a conversa entrou em controle manual."
@@ -110,7 +120,7 @@ def process_pending_tasks() -> None:
                 continue
 
             if task.task_type == "delayed_auto_reply":
-                if not ops.can_auto_reply(db, conversation):
+                if not ops.can_auto_reply(db, conversation, lead=lead):
                     task.status = "cancelled"
                     task.last_result = "Auto-reply cancelado por configuracao/manual takeover."
                     continue
@@ -127,7 +137,18 @@ def process_pending_tasks() -> None:
                     conversation=conversation,
                     inbound_text=inbound_text,
                     research=task.payload or {},
-                    operating_instruction=runtime_service.build_sales_instruction(db),
+                    operating_instruction=runtime_service.build_sales_instruction(
+                        db,
+                        lead=lead,
+                        conversation=conversation,
+                        phase="reply",
+                    ),
+                    instruction_snapshot=runtime_service.build_instruction_snapshot(
+                        db,
+                        phase="reply",
+                        lead=lead,
+                        conversation=conversation,
+                    ),
                 )
                 conversation.temperature = result.get("temperature", conversation.temperature)
                 conversation.stage = result.get("stage", conversation.stage or "engaged")
@@ -154,6 +175,8 @@ def process_pending_tasks() -> None:
                     sender="agent",
                     author_role="agent",
                     queue_context={"queue_origin": "auto_reply"},
+                    prompt_phase=str(result.get("_prompt_phase") or "reply"),
+                    instruction_snapshot=result.get("_instruction_snapshot"),
                 )
                 task.status = "completed"
                 task.last_result = f"Resposta processada com status {sent.status}."
@@ -164,12 +187,19 @@ def process_pending_tasks() -> None:
                 task.last_result = "Follow-up cancelado porque a conversa esta em controle manual/pausada."
                 continue
 
-            text = agent.schedule_followup_message(
+            followup_payload = agent.schedule_followup_message_payload(
+                db=db,
                 lead=lead,
                 conversation=conversation,
                 research=task.payload or {},
-                operating_instruction=runtime_service.build_sales_instruction(db),
+                operating_instruction=runtime_service.build_sales_instruction(
+                    db,
+                    lead=lead,
+                    conversation=conversation,
+                    phase="followup",
+                ),
             )
+            text = str(followup_payload.get("message") or "")
 
             sent = ops.send_outbound_message(
                 db=db,
@@ -179,6 +209,8 @@ def process_pending_tasks() -> None:
                 sender="agent",
                 author_role="agent",
                 queue_context={"queue_origin": "follow_up"},
+                prompt_phase=str(followup_payload.get("_prompt_phase") or "followup"),
+                instruction_snapshot=followup_payload.get("_instruction_snapshot"),
             )
             task.current_attempt += 1
             task.last_result = f"Follow-up processado em {utcnow().isoformat()} com status {sent.status}"

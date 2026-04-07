@@ -33,8 +33,11 @@ class ConversationOpsService:
             conversation.reply_delay_seconds = int(runtime["default_auto_reply_delay_seconds"])
         return conversation
 
-    def can_auto_reply(self, db: Session, conversation: Conversation) -> bool:
+    def can_auto_reply(self, db: Session, conversation: Conversation, *, lead: Lead | None = None) -> bool:
         runtime = self.runtime_service.get_runtime_config(db)
+        inbound_scope = str(runtime.get("inbound_auto_reply_scope") or "known_only")
+        if inbound_scope == "known_only" and lead is not None and getattr(lead, "inbound_unverified", False):
+            return False
         return (
             bool(runtime["auto_reply_enabled"])
             and conversation.auto_reply_enabled
@@ -102,24 +105,44 @@ class ConversationOpsService:
             task.status = "cancelled"
             task.last_result = "Cancelada por nova mensagem ou acao manual."
 
+    def session_outbound_cooldown_seconds(self, session: WhatsappSession | None) -> int:
+        if session is None or session.outbound_cooldown_seconds is None:
+            return 0
+        return max(0, int(session.outbound_cooldown_seconds))
+
     def next_outbound_slot(
         self,
         db: Session,
         *,
+        outbound_session_id: int | None,
         delay_seconds: int = PROVIDER_RATE_LIMIT_SECONDS,
         exclude_task_id: int | None = None,
         base_time: datetime | None = None,
     ) -> datetime:
         slot = base_time or utcnow()
-        latest_outbound = db.scalar(select(Message).where(Message.direction == "outbound").order_by(Message.sent_at.desc()))
+        if delay_seconds <= 0:
+            return slot
+        latest_outbound_stmt = (
+            select(Message)
+            .join(Conversation, Conversation.id == Message.conversation_id)
+            .where(Message.direction == "outbound")
+        )
+        if outbound_session_id is None:
+            latest_outbound_stmt = latest_outbound_stmt.where(Conversation.whatsapp_session_id.is_(None))
+        else:
+            latest_outbound_stmt = latest_outbound_stmt.where(Conversation.whatsapp_session_id == outbound_session_id)
+        latest_outbound = db.scalar(latest_outbound_stmt.order_by(Message.sent_at.desc()))
         if latest_outbound:
             slot = max(slot, latest_outbound.sent_at + timedelta(seconds=delay_seconds))
 
         queued_tasks = list(
             db.scalars(
-                select(AgentTask).where(
+                select(AgentTask)
+                .join(Conversation, Conversation.id == AgentTask.conversation_id)
+                .where(
                     AgentTask.task_type == "queued_outbound",
                     AgentTask.status == "pending",
+                    Conversation.whatsapp_session_id == outbound_session_id,
                 )
             )
         )
@@ -210,14 +233,24 @@ class ConversationOpsService:
         metadata: dict[str, Any] | None = None,
         queue_context: dict[str, Any] | None = None,
         respect_rate_limit: bool = True,
+        prompt_phase: str | None = None,
+        instruction_snapshot: dict[str, Any] | None = None,
     ) -> Message:
         runtime = self.runtime_service.get_runtime_config(db)
         outbound_session = self._resolve_outbound_session(db, conversation)
-        can_send_real = bool(runtime["outbound_enabled"]) and bool(self._session_api_key(outbound_session))
+        session_cooldown_seconds = self.session_outbound_cooldown_seconds(outbound_session)
+        can_send_real = bool(runtime["outbound_enabled"]) and (
+            bool(self._session_api_key(outbound_session)) or bool(getattr(self.settings, "has_wasender_credentials", False))
+        )
         now = utcnow()
 
-        if can_send_real and respect_rate_limit:
-            next_slot = self.next_outbound_slot(db, base_time=now)
+        if can_send_real and respect_rate_limit and session_cooldown_seconds > 0:
+            next_slot = self.next_outbound_slot(
+                db,
+                outbound_session_id=outbound_session.id if outbound_session else None,
+                delay_seconds=session_cooldown_seconds,
+                base_time=now,
+            )
             if next_slot > now:
                 message = Message(
                     conversation_id=conversation.id,
@@ -227,6 +260,8 @@ class ConversationOpsService:
                     author_role=author_role,
                     content=text,
                     status="queued_waiting",
+                    prompt_phase=prompt_phase,
+                    instruction_snapshot_json=instruction_snapshot,
                     metadata_json={},
                     sent_at=now,
                 )
@@ -265,6 +300,8 @@ class ConversationOpsService:
             author_role=author_role,
             content=text,
             status=send_result.get("data", {}).get("status", "queued"),
+            prompt_phase=prompt_phase,
+            instruction_snapshot_json=instruction_snapshot,
             metadata_json=send_result,
             sent_at=utcnow(),
         )
@@ -273,10 +310,18 @@ class ConversationOpsService:
         conversation.last_outbound_at = message.sent_at
 
         if can_send_real and self.is_rate_limited(send_result):
-            retry_after = self.extract_retry_after_seconds(send_result) or PROVIDER_RATE_LIMIT_SECONDS
+            retry_after = self.extract_retry_after_seconds(send_result)
+            retry_delay_seconds = (
+                max(1, retry_after) if retry_after is not None else max(session_cooldown_seconds, PROVIDER_RATE_LIMIT_SECONDS)
+            )
             scheduled_for = max(
-                utcnow() + timedelta(seconds=retry_after),
-                self.next_outbound_slot(db, base_time=now),
+                utcnow() + timedelta(seconds=retry_delay_seconds),
+                self.next_outbound_slot(
+                    db,
+                    outbound_session_id=outbound_session.id if outbound_session else None,
+                    delay_seconds=retry_delay_seconds,
+                    base_time=now,
+                ),
             )
             db.flush()
             self.queue_existing_message(
@@ -301,17 +346,27 @@ class ConversationOpsService:
         task: AgentTask,
     ) -> Message:
         outbound_session = self._resolve_outbound_session(db, conversation)
+        session_cooldown_seconds = self.session_outbound_cooldown_seconds(outbound_session)
         send_result = WasenderClient(api_key=self._session_api_key(outbound_session)).send_text_message(
             to=lead.whatsapp_number or lead.phone_number,
             text=message.content,
         )
         if self.is_rate_limited(send_result):
-            retry_after = self.extract_retry_after_seconds(send_result) or PROVIDER_RATE_LIMIT_SECONDS
+            retry_after = self.extract_retry_after_seconds(send_result)
             queue_context = dict(task.payload or {})
             queue_context.pop("message_id", None)
+            retry_delay_seconds = (
+                max(1, retry_after) if retry_after is not None else max(session_cooldown_seconds, PROVIDER_RATE_LIMIT_SECONDS)
+            )
             scheduled_for = max(
-                utcnow() + timedelta(seconds=retry_after),
-                self.next_outbound_slot(db, exclude_task_id=task.id, base_time=utcnow()),
+                utcnow() + timedelta(seconds=retry_delay_seconds),
+                self.next_outbound_slot(
+                    db,
+                    outbound_session_id=outbound_session.id if outbound_session else None,
+                    delay_seconds=retry_delay_seconds,
+                    exclude_task_id=task.id,
+                    base_time=utcnow(),
+                ),
             )
             self.queue_existing_message(
                 db,
@@ -346,4 +401,6 @@ class ConversationOpsService:
         return self.session_service.get_active_session(db)
 
     def _session_api_key(self, session: WhatsappSession | None) -> str | None:
-        return session.api_key if session and session.api_key else self.settings.wasender_api_key or None
+        if session and session.api_key:
+            return session.api_key
+        return getattr(self.settings, "wasender_api_key", None) or None

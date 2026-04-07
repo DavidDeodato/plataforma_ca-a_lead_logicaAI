@@ -6,12 +6,15 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
-from app.db.models import AppSetting, Campaign, KnowledgeItem, Playbook
+from app.db.models import AppSetting, Conversation, Lead
+from app.services.strategy_resolver import StrategyResolverService
 
 
 RUNTIME_DEFAULTS = {
     "outbound_enabled": True,
     "auto_reply_enabled": False,
+    "inbound_auto_reply_scope": "known_only",
+    "persist_unknown_inbound": True,
     "default_niche": None,
     "default_city": None,
     "outreach_daily_limit": None,
@@ -22,6 +25,9 @@ RUNTIME_DEFAULTS = {
     "offer_goal": "gerar mais contatos, agendamentos e vendas",
     "sales_tone": "consultivo, humano e objetivo",
     "cta_style": "convidar o lead para entender rapidamente como a pagina ajudaria o negocio",
+    "active_offer_product_id": None,
+    "active_agent_strategy_id": None,
+    "active_prospecting_recipe_id": None,
 }
 
 
@@ -33,6 +39,8 @@ class RuntimeConfigService:
         config = {
             "outbound_enabled": self.settings.outbound_enabled,
             "auto_reply_enabled": self.settings.auto_reply_enabled,
+            "inbound_auto_reply_scope": RUNTIME_DEFAULTS["inbound_auto_reply_scope"],
+            "persist_unknown_inbound": RUNTIME_DEFAULTS["persist_unknown_inbound"],
             "default_niche": self.settings.default_niche,
             "default_city": self.settings.default_city,
             "outreach_daily_limit": self.settings.outreach_daily_limit,
@@ -43,6 +51,9 @@ class RuntimeConfigService:
             "offer_goal": RUNTIME_DEFAULTS["offer_goal"],
             "sales_tone": RUNTIME_DEFAULTS["sales_tone"],
             "cta_style": RUNTIME_DEFAULTS["cta_style"],
+            "active_offer_product_id": RUNTIME_DEFAULTS["active_offer_product_id"],
+            "active_agent_strategy_id": RUNTIME_DEFAULTS["active_agent_strategy_id"],
+            "active_prospecting_recipe_id": RUNTIME_DEFAULTS["active_prospecting_recipe_id"],
         }
 
         rows = list(db.scalars(select(AppSetting)))
@@ -72,39 +83,39 @@ class RuntimeConfigService:
             "auto_reply_enabled": bool(config["auto_reply_enabled"]),
         }
 
-    def build_sales_instruction(self, db: Session) -> str:
-        config = self.get_runtime_config(db)
-        active_campaign = db.scalar(select(Campaign).where(Campaign.is_active.is_(True)).order_by(Campaign.updated_at.desc()))
-        playbooks = list(db.scalars(select(Playbook).where(Playbook.active.is_(True)).order_by(Playbook.updated_at.desc()).limit(5)))
-        knowledge_items = list(
-            db.scalars(select(KnowledgeItem).where(KnowledgeItem.active.is_(True)).order_by(KnowledgeItem.updated_at.desc()).limit(8))
+    def build_instruction_snapshot(
+        self,
+        db: Session,
+        *,
+        phase: str,
+        lead: Lead | None = None,
+        conversation: Conversation | None = None,
+        extra_instruction: str | None = None,
+    ) -> dict[str, Any]:
+        runtime = self.get_runtime_config(db)
+        return StrategyResolverService().resolve_snapshot(
+            db,
+            phase=phase,
+            runtime=runtime,
+            lead=lead,
+            conversation=conversation,
+            extra_instruction=extra_instruction,
         )
 
-        campaign_context = ""
-        if active_campaign:
-            campaign_context = (
-                f" Campanha ativa: {active_campaign.name}. Nicho: {active_campaign.niche}. Cidade: {active_campaign.city}. "
-                f"Oferta: {active_campaign.offer_name}. Objetivo: {active_campaign.offer_goal}. "
-                f"Tom: {active_campaign.sales_tone}. CTA: {active_campaign.cta_style}."
-            )
-
-        playbook_context = ""
-        if playbooks:
-            playbook_context = " Playbooks ativos: " + " | ".join(
-                f"{item.name}: {item.instructions}" for item in playbooks
-            )
-
-        knowledge_context = ""
-        if knowledge_items:
-            knowledge_context = " Conhecimento relevante: " + " | ".join(
-                f"{item.category} - {item.title}: {item.content}" for item in knowledge_items
-            )
-
-        return (
-            f"Oferta principal: {config['offer_name']}. "
-            f"Resumo da oferta: {config['offer_summary']}. "
-            f"Objetivo comercial: {config['offer_goal']}. "
-            f"Tom desejado: {config['sales_tone']}. "
-            f"Estilo de CTA: {config['cta_style']}."
-            f"{campaign_context}{playbook_context}{knowledge_context}"
+    def build_sales_instruction(
+        self,
+        db: Session,
+        *,
+        lead: Lead | None = None,
+        conversation: Conversation | None = None,
+        phase: str = "outreach",
+        extra_instruction: str | None = None,
+    ) -> str:
+        snapshot = self.build_instruction_snapshot(
+            db,
+            phase=phase,
+            lead=lead,
+            conversation=conversation,
+            extra_instruction=extra_instruction,
         )
+        return StrategyResolverService().render_instruction(snapshot, lead=lead)

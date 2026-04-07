@@ -124,9 +124,57 @@ export function LeadDetailPage() {
             <div><span>Instagram</span><strong>{lead.instagram_url || '—'}</strong></div>
             <div><span>Website</span><strong>{lead.website || '—'}</strong></div>
             <div><span>Origem</span><strong>{lead.source_platform || '—'}</strong></div>
+            <div><span>Fit score</span><strong>{lead.fit_score ?? '—'} {lead.fit_label ? `(${lead.fit_label})` : ''}</strong></div>
+            <div><span>Estágio do funil</span><strong>{lead.funnel_stage}</strong></div>
+            <div><span>Prioridade</span><strong>{lead.priority_score ?? '—'} {lead.priority_label ? `(${lead.priority_label})` : ''}</strong></div>
+            <div><span>Próxima ação</span><strong>{lead.recommended_action?.label || '—'}</strong></div>
           </div>
         </Panel>
 
+        <Panel title="Scorecard comercial" subtitle="Sinais que mostram se o lead merece insistência e qual o próximo passo.">
+          <div className="kv-list">
+            <div><span>Intent</span><strong>{lead.intent_status}</strong></div>
+            <div><span>Dor</span><strong>{lead.pain_status}</strong></div>
+            <div><span>Autoridade</span><strong>{lead.authority_status}</strong></div>
+            <div><span>Urgência</span><strong>{lead.urgency_status}</strong></div>
+            <div><span>Meeting</span><strong>{lead.meeting_status}</strong></div>
+            <div><span>Objeção</span><strong>{lead.objection_status}</strong></div>
+          </div>
+          {lead.recommended_action ? (
+            <article className="note-card">
+              <strong>{lead.recommended_action.label}</strong>
+              <p>{lead.recommended_action.description}</p>
+            </article>
+          ) : null}
+          {lead.suggested_playbook ? (
+            <article className="note-card">
+              <strong>Playbook sugerido: {lead.suggested_playbook.name}</strong>
+              <p>{lead.suggested_playbook.instructions}</p>
+              <small>{lead.suggested_playbook.applicability_reason}</small>
+              {lead.suggested_playbook.objection_handling ? (
+                <p>Objeções: {lead.suggested_playbook.objection_handling}</p>
+              ) : null}
+              {lead.suggested_playbook.qualification_rules ? (
+                <p>Qualificação: {lead.suggested_playbook.qualification_rules}</p>
+              ) : null}
+            </article>
+          ) : null}
+          {lead.fit_reasons_json?.components?.length ? (
+            <div className="stack">
+              {lead.fit_reasons_json.components.map((component) => (
+                <article key={component.key} className="note-card">
+                  <strong>
+                    {component.label}: {component.score}/{component.max_score}
+                  </strong>
+                  <p>{component.reason}</p>
+                </article>
+              ))}
+            </div>
+          ) : null}
+        </Panel>
+      </div>
+
+      <div className="page-grid page-grid--detail">
         <Panel title="Pesquisa comercial" subtitle="Contexto objetivo coletado para personalizar a venda.">
           {lead.research_entries.length === 0 ? (
             <EmptyState title="Sem pesquisa salva" description="Use reprocessar para gerar um enriquecimento novo." />

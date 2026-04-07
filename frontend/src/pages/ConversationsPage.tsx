@@ -1,14 +1,21 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
-import type { FormEvent, KeyboardEvent } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import type { FormEvent, KeyboardEvent, ReactNode } from 'react'
+import { Eye, PanelLeftOpen, SendHorizontal, Settings2, X } from 'lucide-react'
 import { Link, useSearchParams } from 'react-router-dom'
-import { ChevronLeft, ChevronRight, SendHorizontal, SlidersHorizontal } from 'lucide-react'
 
 import { EmptyState } from '../components/EmptyState'
-import { Panel } from '../components/Panel'
 import { StatusPill } from '../components/StatusPill'
 import { api } from '../lib/api'
 import { formatDateTime } from '../lib/format'
-import type { Conversation, ConversationListResponse, LeadDetail, Message, Task } from '../lib/types'
+import type {
+  Conversation,
+  ConversationListResponse,
+  ConversationWorkspace,
+  LeadWorkspace,
+  Message,
+  Task,
+  WhatsappSessionWorkspace,
+} from '../lib/types'
 
 function authorLabel(message: Message) {
   if (message.author_role === 'human') return 'Você'
@@ -31,19 +38,21 @@ function formatCountdown(totalSeconds: number | null) {
   return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`
 }
 
+function formatDurationLabel(totalSeconds: number | null | undefined) {
+  if (totalSeconds === null || totalSeconds === undefined || totalSeconds <= 0) return 'sem limite'
+  if (totalSeconds < 60) return `${totalSeconds}s`
+  const minutes = Math.floor(totalSeconds / 60)
+  const seconds = totalSeconds % 60
+  if (seconds === 0) return `${minutes} min`
+  return `${minutes}m ${seconds}s`
+}
+
 function scheduledAt(task: Task) {
   return typeof task.next_run_at === 'string' ? task.next_run_at : undefined
 }
 
-function getMessageDeliveryDetails(message: Message, nowMs?: number): {
-  tone: string
-  label: string
-  description: string
-  providerTarget?: string
-  extraHint?: string
-}
 function getMessageDeliveryDetails(message: Message, nowMs = Date.now()): {
-  tone: string
+  tone: 'default' | 'success' | 'warning' | 'danger' | 'info'
   label: string
   description: string
   providerTarget?: string
@@ -162,6 +171,51 @@ function getMessageDeliveryDetails(message: Message, nowMs = Date.now()): {
   }
 }
 
+function conversationModeLabel(conversation: Conversation) {
+  if (conversation.manual_mode) return 'humano'
+  if (conversation.automation_paused) return 'pausada'
+  return 'agente'
+}
+
+function buildConversationHeadline(lead: LeadWorkspace, conversation: Conversation) {
+  return `${lead.niche} em ${lead.city} • ${conversation.whatsapp_session_name || 'linha legada'}`
+}
+
+function ActionSheet({
+  title,
+  subtitle,
+  onClose,
+  children,
+}: {
+  title: string
+  subtitle: string
+  onClose: () => void
+  children: ReactNode
+}) {
+  return (
+    <div className="conversation-sheet-backdrop" role="presentation" onClick={onClose}>
+      <aside
+        className="conversation-sheet"
+        role="dialog"
+        aria-modal="true"
+        aria-label={title}
+        onClick={(event) => event.stopPropagation()}
+      >
+        <header className="conversation-sheet__header">
+          <div>
+            <strong>{title}</strong>
+            <p>{subtitle}</p>
+          </div>
+          <button className="button button--ghost button--icon" type="button" onClick={onClose} aria-label="Fechar painel">
+            <X size={16} />
+          </button>
+        </header>
+        <div className="conversation-sheet__body">{children}</div>
+      </aside>
+    </div>
+  )
+}
+
 export function ConversationsPage() {
   const [searchParams, setSearchParams] = useSearchParams()
   const leadIdParam = searchParams.get('leadId')
@@ -169,35 +223,47 @@ export function ConversationsPage() {
   const selectedConversationIdRef = useRef<number | null>(null)
   const listRequestIdRef = useRef(0)
   const threadRequestIdRef = useRef(0)
+  const timelineRef = useRef<HTMLDivElement | null>(null)
+
   const [data, setData] = useState<ConversationListResponse | null>(null)
+  const [sessionWorkspace, setSessionWorkspace] = useState<WhatsappSessionWorkspace | null>(null)
   const [pendingQueueTasks, setPendingQueueTasks] = useState<Task[]>([])
+  const [workspace, setWorkspace] = useState<ConversationWorkspace | null>(null)
   const [listLoading, setListLoading] = useState(true)
   const [threadLoading, setThreadLoading] = useState(false)
   const [openingConversationId, setOpeningConversationId] = useState<number | null>(null)
+  const [activeSheet, setActiveSheet] = useState<'details' | 'controls' | null>(null)
   const [nowMs, setNowMs] = useState(() => Date.now())
   const [error, setError] = useState<string | null>(null)
   const [actionError, setActionError] = useState<string | null>(null)
   const [actionNotice, setActionNotice] = useState<string | null>(null)
   const [actionLoading, setActionLoading] = useState<string | null>(null)
   const [selectedConversationId, setSelectedConversationId] = useState<number | null>(null)
-  const [conversation, setConversation] = useState<Conversation | null>(null)
-  const [lead, setLead] = useState<LeadDetail | null>(null)
   const [operatorName, setOperatorName] = useState('gestor')
   const [composer, setComposer] = useState('')
   const [selectedIds, setSelectedIds] = useState<number[]>([])
-  const [showInbox, setShowInbox] = useState(true)
-  const [showControls, setShowControls] = useState(true)
   const [filters, setFilters] = useState({
     unreadOnly: false,
     pendingReviewOnly: false,
     manualMode: '',
+    sessionScope: 'active',
+    sortBy: 'priority',
+    sortDirection: 'desc',
   })
+
+  const conversation = workspace?.conversation ?? null
+  const lead = workspace?.lead ?? null
 
   const params = useMemo(() => {
     const current = new URLSearchParams({ page: '1', page_size: '50' })
     if (filters.unreadOnly) current.set('unread_only', 'true')
     if (filters.pendingReviewOnly) current.set('pending_review_only', 'true')
     if (filters.manualMode) current.set('manual_mode', filters.manualMode)
+    if (filters.sessionScope === 'active') current.set('active_session_only', 'true')
+    if (filters.sessionScope === 'legacy') current.set('legacy_only', 'true')
+    if (filters.sessionScope.startsWith('session:')) current.set('whatsapp_session_id', filters.sessionScope.replace('session:', ''))
+    current.set('sort_by', filters.sortBy)
+    current.set('sort_direction', filters.sortDirection)
     return current
   }, [filters])
 
@@ -244,17 +310,12 @@ export function ConversationsPage() {
     () =>
       conversationTasks
         .filter((task) => task.task_type === 'queued_outbound' && task.status === 'pending')
-        .sort((left, right) => {
-          const leftTime = new Date(left.next_run_at || 0).getTime()
-          const rightTime = new Date(right.next_run_at || 0).getTime()
-          return leftTime - rightTime
-        }),
+        .sort((left, right) => new Date(left.next_run_at || 0).getTime() - new Date(right.next_run_at || 0).getTime()),
     [conversationTasks],
   )
 
   const queuedMessagesInConversation = useMemo(
-    () =>
-      visibleMessages.filter((message) => ['queued_waiting', 'queued_retry'].includes(message.status || '')),
+    () => visibleMessages.filter((message) => ['queued_waiting', 'queued_retry'].includes(message.status || '')),
     [visibleMessages],
   )
 
@@ -262,19 +323,13 @@ export function ConversationsPage() {
     () =>
       pendingQueueTasks
         .filter((task) => task.task_type === 'queued_outbound' && task.status === 'pending')
-        .sort((left, right) => {
-          const leftTime = new Date(left.next_run_at || 0).getTime()
-          const rightTime = new Date(right.next_run_at || 0).getTime()
-          return leftTime - rightTime
-        }),
+        .sort((left, right) => new Date(left.next_run_at || 0).getTime() - new Date(right.next_run_at || 0).getTime()),
     [pendingQueueTasks],
   )
 
   const queuePositionByTaskId = useMemo(() => {
     const positions = new Map<number, number>()
-    globalQueuedOutboundTasks.forEach((task, index) => {
-      positions.set(task.id, index + 1)
-    })
+    globalQueuedOutboundTasks.forEach((task, index) => positions.set(task.id, index + 1))
     return positions
   }, [globalQueuedOutboundTasks])
 
@@ -291,9 +346,22 @@ export function ConversationsPage() {
     return candidates[0] ?? null
   }, [queuedMessagesInConversation])
 
+  const currentSession = useMemo(() => {
+    if (!sessionWorkspace) return null
+    const sessionId = conversation?.whatsapp_session_id ?? sessionWorkspace.active_session_id ?? null
+    if (!sessionId) return null
+    return sessionWorkspace.items.find((item) => item.id === sessionId) ?? null
+  }, [conversation?.whatsapp_session_id, sessionWorkspace])
+
   useEffect(() => {
     selectedConversationIdRef.current = selectedConversationId
   }, [selectedConversationId])
+
+  useEffect(() => {
+    const target = timelineRef.current
+    if (!target) return
+    target.scrollTop = target.scrollHeight
+  }, [selectedConversationId, visibleMessages.length])
 
   useEffect(() => {
     const hasCountdown = Boolean(pendingAutoReplyTask || pendingQueuedOutboundTasks.length)
@@ -329,7 +397,15 @@ export function ConversationsPage() {
     })
   }
 
-  const syncConversationSearchParam = (conversationId: number | null) => {
+  const updateWorkspaceConversation = (updatedConversation: Conversation) => {
+    setWorkspace((current) =>
+      current && current.conversation.id === updatedConversation.id
+        ? { ...current, conversation: updatedConversation }
+        : current,
+    )
+  }
+
+  const syncConversationSearchParam = useCallback((conversationId: number | null) => {
     const next = new URLSearchParams(searchParams)
     if (conversationId) {
       next.set('conversationId', String(conversationId))
@@ -338,9 +414,9 @@ export function ConversationsPage() {
     }
     next.delete('leadId')
     setSearchParams(next, { replace: true })
-  }
+  }, [searchParams, setSearchParams])
 
-  const loadList = async (options?: { quiet?: boolean }) => {
+  const loadList = useCallback(async (options?: { quiet?: boolean }) => {
     const requestId = ++listRequestIdRef.current
     if (!options?.quiet) {
       setListLoading(true)
@@ -351,35 +427,26 @@ export function ConversationsPage() {
       if (requestId !== listRequestIdRef.current) return
       setData(payload)
       const currentSelectedConversationId = selectedConversationIdRef.current
-      const preferredConversation = conversationIdParam
-        ? payload.items.find((item) => item.id === Number(conversationIdParam))
-        : null
+      const preferredConversation = conversationIdParam ? payload.items.find((item) => item.id === Number(conversationIdParam)) : null
       const preferred =
-        !currentSelectedConversationId && leadIdParam
-          ? payload.items.find((item) => item.lead_id === Number(leadIdParam))
-          : null
+        !currentSelectedConversationId && leadIdParam ? payload.items.find((item) => item.lead_id === Number(leadIdParam)) : null
       const selectedStillExists = currentSelectedConversationId
         ? payload.items.some((item) => item.id === currentSelectedConversationId)
         : false
 
-      if (preferredConversation) {
-        if (preferredConversation.id !== currentSelectedConversationId) {
-          selectedConversationIdRef.current = preferredConversation.id
-          setSelectedConversationId(preferredConversation.id)
-        }
-      } else if (preferred) {
-        if (preferred.id !== currentSelectedConversationId) {
-          selectedConversationIdRef.current = preferred.id
-          setSelectedConversationId(preferred.id)
-        }
+      if (preferredConversation && preferredConversation.id !== currentSelectedConversationId) {
+        selectedConversationIdRef.current = preferredConversation.id
+        setSelectedConversationId(preferredConversation.id)
+      } else if (preferred && preferred.id !== currentSelectedConversationId) {
+        selectedConversationIdRef.current = preferred.id
+        setSelectedConversationId(preferred.id)
       } else if (!selectedStillExists && payload.items[0]) {
         selectedConversationIdRef.current = payload.items[0].id
         setSelectedConversationId(payload.items[0].id)
       } else if (payload.items.length === 0) {
         selectedConversationIdRef.current = null
         setSelectedConversationId(null)
-        setConversation(null)
-        setLead(null)
+        setWorkspace(null)
         syncConversationSearchParam(null)
       }
     } catch (err) {
@@ -390,42 +457,45 @@ export function ConversationsPage() {
         setListLoading(false)
       }
     }
-  }
+  }, [conversationIdParam, leadIdParam, params, syncConversationSearchParam])
 
-  const loadPendingQueueTasks = async () => {
+  const loadPendingQueueTasks = useCallback(async () => {
     try {
-      const params = new URLSearchParams({ page: '1', page_size: '200', status: 'pending' })
-      const payload = await api.listTasks(params)
+      const taskParams = new URLSearchParams({ page: '1', page_size: '100', status: 'pending' })
+      const payload = await api.listTasks(taskParams)
       setPendingQueueTasks(payload.items)
     } catch {
       setPendingQueueTasks([])
     }
-  }
+  }, [])
 
-  const loadSelected = async (
-    conversationId: number,
-    options?: { quiet?: boolean; syncComposer?: boolean },
-  ) => {
+  const loadSessionWorkspace = useCallback(async () => {
+    try {
+      const payload = await api.listWhatsappSessions()
+      setSessionWorkspace(payload)
+    } catch {
+      setSessionWorkspace(null)
+    }
+  }, [])
+
+  const loadSelected = useCallback(async (conversationId: number, options?: { quiet?: boolean; syncComposer?: boolean }) => {
     const requestId = ++threadRequestIdRef.current
     if (!options?.quiet) {
       setThreadLoading(true)
     }
     try {
-      const currentConversation = await api.getConversation(conversationId)
-      const leadDetail = await api.getLead(currentConversation.lead_id)
+      const payload = await api.getConversationWorkspace(conversationId)
       if (requestId !== threadRequestIdRef.current) return
       if (selectedConversationIdRef.current !== conversationId) return
-      setConversation(currentConversation)
+      setWorkspace(payload)
       if (options?.syncComposer) {
-        setComposer(currentConversation.pending_draft || '')
+        setComposer(payload.conversation.pending_draft || '')
       }
-      setLead(leadDetail)
     } catch (err) {
       if (requestId !== threadRequestIdRef.current) return
       if (selectedConversationIdRef.current !== conversationId) return
       const message = (err as Error).message
-      setConversation(null)
-      setLead(null)
+      setWorkspace(null)
       setComposer('')
       setActionError(
         message.includes('Conversa não encontrada')
@@ -439,26 +509,27 @@ export function ConversationsPage() {
         syncConversationSearchParam(null)
       }
     } finally {
-      if (requestId !== threadRequestIdRef.current) return
-      if (selectedConversationIdRef.current === conversationId) {
+      const isCurrentRequest = requestId === threadRequestIdRef.current
+      if (isCurrentRequest && selectedConversationIdRef.current === conversationId) {
         setOpeningConversationId(null)
       }
-      if (!options?.quiet) {
+      if (isCurrentRequest && !options?.quiet) {
         setThreadLoading(false)
       }
     }
-  }
+  }, [data?.items, syncConversationSearchParam])
 
   useEffect(() => {
     void loadList()
     void loadPendingQueueTasks()
-  }, [params, leadIdParam, conversationIdParam])
+    void loadSessionWorkspace()
+  }, [loadList, loadPendingQueueTasks, loadSessionWorkspace])
 
   useEffect(() => {
     if (!selectedConversationId) return
     syncConversationSearchParam(selectedConversationId)
     void loadSelected(selectedConversationId, { syncComposer: true })
-  }, [selectedConversationId])
+  }, [loadSelected, selectedConversationId, syncConversationSearchParam])
 
   useEffect(() => {
     const interval = window.setInterval(() => {
@@ -467,10 +538,9 @@ export function ConversationsPage() {
       if (selectedConversationId) {
         void loadSelected(selectedConversationId, { quiet: true, syncComposer: false })
       }
-    }, 2000)
-
+    }, 5000)
     return () => window.clearInterval(interval)
-  }, [params, leadIdParam, conversationIdParam, selectedConversationId])
+  }, [loadList, loadPendingQueueTasks, loadSelected, selectedConversationId])
 
   const refreshCurrentConversation = async () => {
     await loadList({ quiet: true })
@@ -486,6 +556,7 @@ export function ConversationsPage() {
     setActionNotice(null)
     setOpeningConversationId(conversationId)
     setThreadLoading(true)
+    setActiveSheet(null)
     syncConversationSearchParam(conversationId)
     setSelectedConversationId(conversationId)
   }
@@ -551,16 +622,14 @@ export function ConversationsPage() {
         content,
         mark_as_read: true,
       })
-      setConversation(updatedConversation)
+      updateWorkspaceConversation(updatedConversation)
       setComposer('')
       updateConversationListItem(updatedConversation)
       const latestMessage = updatedConversation.messages[updatedConversation.messages.length - 1]
       if (latestMessage) {
         const delivery = getMessageDeliveryDetails(latestMessage)
         if (delivery.tone === 'danger') {
-          setActionError(
-            delivery.extraHint ? `${delivery.description} ${delivery.extraHint}` : delivery.description,
-          )
+          setActionError(delivery.extraHint ? `${delivery.description} ${delivery.extraHint}` : delivery.description)
         } else {
           setActionNotice(
             delivery.extraHint
@@ -589,13 +658,15 @@ export function ConversationsPage() {
   const onSaveSettings = async () => {
     if (!selectedConversationId || !conversation) return
     await runConversationAction('save-settings', 'Controles da conversa atualizados.', async () => {
-      await api.updateConversationSettings(selectedConversationId, {
+      const updatedConversation = await api.updateConversationSettings(selectedConversationId, {
         auto_reply_enabled: conversation.auto_reply_enabled,
         automation_paused: conversation.automation_paused,
         reply_delay_seconds: conversation.reply_delay_seconds,
         assignee: conversation.assignee,
         pending_human_review: conversation.pending_human_review,
       })
+      updateWorkspaceConversation(updatedConversation)
+      updateConversationListItem(updatedConversation)
     })
   }
 
@@ -610,48 +681,84 @@ export function ConversationsPage() {
 
   return (
     <div className="page page--conversations">
-      <section className="chat-workspace__topbar">
-        <div className="chat-workspace__title">
+      <section className="page-heading page-heading--compact">
+        <div>
           <span className="eyebrow">Inbox operacional</span>
-          <strong>Conversas</strong>
+          <h1>Conversas</h1>
+          <p>Thread ampla, leitura clara e controles fora do caminho até você realmente precisar deles.</p>
         </div>
-        <div className="chat-workspace__filters">
-          <label className="toggle-inline">
-            <input
-              type="checkbox"
-              checked={filters.unreadOnly}
-              onChange={(event) => setFilters((current) => ({ ...current, unreadOnly: event.target.checked }))}
-            />
-            Não lidas
-          </label>
-          <label className="toggle-inline">
-            <input
-              type="checkbox"
-              checked={filters.pendingReviewOnly}
-              onChange={(event) =>
-                setFilters((current) => ({ ...current, pendingReviewOnly: event.target.checked }))
-              }
-            />
-            Review
-          </label>
-          <select
-            className="field chat-workspace__field"
-            value={filters.manualMode}
-            onChange={(event) => setFilters((current) => ({ ...current, manualMode: event.target.value }))}
-          >
-            <option value="">Todas</option>
-            <option value="true">Humano</option>
-            <option value="false">Automáticas</option>
-          </select>
+        <div className="page-heading__actions">
           <input
-            className="field chat-workspace__field"
+            className="field page-heading__operator"
             value={operatorName}
             onChange={(event) => setOperatorName(event.target.value)}
             placeholder="Operador"
           />
         </div>
+      </section>
+
+      <section className="conversation-toolbar">
+        <label className="toggle-inline">
+          <input
+            type="checkbox"
+            checked={filters.unreadOnly}
+            onChange={(event) => setFilters((current) => ({ ...current, unreadOnly: event.target.checked }))}
+          />
+          Não lidas
+        </label>
+        <label className="toggle-inline">
+          <input
+            type="checkbox"
+            checked={filters.pendingReviewOnly}
+            onChange={(event) => setFilters((current) => ({ ...current, pendingReviewOnly: event.target.checked }))}
+          />
+          Review pendente
+        </label>
+        <select
+          className="field conversation-toolbar__field"
+          value={filters.manualMode}
+          onChange={(event) => setFilters((current) => ({ ...current, manualMode: event.target.value }))}
+        >
+          <option value="">Todas as threads</option>
+          <option value="true">Apenas humano</option>
+          <option value="false">Apenas agente</option>
+        </select>
+        <select
+          className="field conversation-toolbar__field"
+          value={filters.sessionScope}
+          onChange={(event) => setFilters((current) => ({ ...current, sessionScope: event.target.value }))}
+        >
+          <option value="active">Linha ativa</option>
+          <option value="">Todas as linhas</option>
+          <option value="legacy">{sessionWorkspace?.legacy_label || 'Histórico legado'}</option>
+          {sessionWorkspace?.items.map((item) => (
+            <option key={item.id} value={`session:${item.id}`}>
+              {item.name}
+              {item.phone_number ? ` • ${item.phone_number}` : ''}
+            </option>
+          ))}
+        </select>
+        <select
+          className="field conversation-toolbar__field"
+          value={filters.sortBy}
+          onChange={(event) => setFilters((current) => ({ ...current, sortBy: event.target.value }))}
+        >
+          <option value="priority">Prioridade operacional</option>
+          <option value="recent">Mais recentes</option>
+          <option value="unread">Mais não lidas</option>
+          <option value="fit_score">Maior fit</option>
+        </select>
+        <select
+          className="field conversation-toolbar__field"
+          value={filters.sortDirection}
+          onChange={(event) => setFilters((current) => ({ ...current, sortDirection: event.target.value }))}
+        >
+          <option value="desc">Maior primeiro</option>
+          <option value="asc">Menor primeiro</option>
+        </select>
+
         {selectedIds.length > 0 ? (
-          <div className="chat-workspace__bulk-actions">
+          <div className="conversation-toolbar__bulk-actions">
             <button className="button button--ghost" onClick={() => void onBulkAction('takeover')}>
               {actionLoading === 'bulk:takeover' ? 'Assumindo...' : 'Assumir lote'}
             </button>
@@ -695,7 +802,9 @@ export function ConversationsPage() {
       ) : null}
 
       {data && data.items.length === 0 ? (
-        <Panel title="Como criar uma conversa" subtitle="Os atalhos principais para não ficar perdido.">
+        <section className="empty-state empty-state--large">
+          <strong>Como criar uma conversa</strong>
+          <p>Você pode prospectar um lote novo ou cadastrar um lead manualmente e dar start na abordagem.</p>
           <div className="inline-actions">
             <Link className="button button--primary" to="/prospecting">
               Fazer pesquisa de clientes
@@ -704,42 +813,28 @@ export function ConversationsPage() {
               Cadastrar lead manualmente
             </Link>
           </div>
-        </Panel>
+        </section>
       ) : null}
 
       {data && data.items.length > 0 ? (
-        <section
-          className={`inbox-layout inbox-layout--chat ${
-            !showInbox && !showControls
-              ? 'inbox-layout--chat-only'
-              : !showInbox
-                ? 'inbox-layout--no-left'
-                : !showControls
-                  ? 'inbox-layout--no-right'
-                  : ''
-          }`}
-        >
-          {showInbox ? (
-          <Panel
-            title="Inbox"
-            subtitle="Escolha a conversa na lista."
-            action={
-              <button className="button button--ghost" type="button" onClick={() => setShowInbox(false)}>
-                <ChevronLeft size={16} />
-                Fechar
-              </button>
-            }
-          >
-            <div className="chat-sidebar">
+        <section className="conversation-layout">
+          <aside className="conversation-sidebar">
+            <header className="conversation-sidebar__header">
+              <div>
+                <strong>Inbox</strong>
+                <p>{data.total} threads no recorte atual</p>
+              </div>
+            </header>
+            <div className="conversation-sidebar__list">
               {data.items.map((item) => (
                 <button
                   key={item.id}
-                  className={`thread-card thread-card--chat ${
+                  className={`conversation-card ${
                     selectedConversationId === item.id ? 'thread-card--active' : ''
                   } ${openingConversationId === item.id ? 'thread-card--loading' : ''}`}
                   onClick={() => handleSelectConversation(item.id)}
                 >
-                  <div className="thread-card__top">
+                  <div className="conversation-card__top">
                     <label className="checkbox-inline" onClick={(event) => event.stopPropagation()}>
                       <input
                         type="checkbox"
@@ -747,73 +842,96 @@ export function ConversationsPage() {
                         onChange={() => toggleSelection(item.id)}
                       />
                     </label>
-                    <strong>{item.lead_name}</strong>
-                    <small>{formatDateTime(item.last_message_at)}</small>
+                    <div className="conversation-card__identity">
+                      <strong>{item.lead_name}</strong>
+                      <span>{formatDateTime(item.last_message_at)}</span>
+                    </div>
+                    {item.unread_count > 0 ? <span className="thread-card__badge">{item.unread_count}</span> : null}
                   </div>
-                  <div className="thread-card__meta">
+                  <div className="conversation-card__meta">
                     <StatusPill tone={item.manual_mode ? 'warning' : 'info'}>
                       {item.manual_mode ? 'humano' : 'agente'}
                     </StatusPill>
+                    {item.inbound_unverified ? <StatusPill tone="warning">inbound não verificado</StatusPill> : null}
                     <StatusPill tone={item.pending_human_review ? 'warning' : 'default'}>
                       {item.pending_human_review ? 'review' : item.stage}
                     </StatusPill>
-                    {item.unread_count > 0 ? <span className="thread-card__badge">{item.unread_count}</span> : null}
+                    <StatusPill tone="default">
+                      {item.whatsapp_session_name || sessionWorkspace?.legacy_label || 'legado'}
+                    </StatusPill>
                   </div>
-                  <p>{item.latest_message_preview || 'Sem preview ainda.'}</p>
-                  <span className="thread-card__action">
-                    {openingConversationId === item.id ? 'Abrindo...' : 'Abrir conversa'}
-                  </span>
+                  <p className="conversation-card__preview">{item.latest_message_preview || 'Sem preview ainda.'}</p>
+                  <small className="conversation-card__summary">
+                    {item.lead_funnel_stage || item.stage}
+                    {item.lead_fit_score ? ` • fit ${item.lead_fit_score}` : ''}
+                    {item.lead_meeting_status ? ` • ${item.lead_meeting_status}` : ''}
+                    {item.source_origin ? ` • origem ${item.source_origin}` : ''}
+                  </small>
+                  <small className="conversation-card__summary">
+                    prioridade {item.priority_score ?? '—'}
+                    {item.priority_label ? ` • ${item.priority_label}` : ''}
+                  </small>
+                  <div className="conversation-card__footer">
+                    <small>{item.recommended_action?.label || 'Sem próxima ação'}</small>
+                    <span className="thread-card__action">{openingConversationId === item.id ? 'Abrindo...' : 'Abrir conversa'}</span>
+                  </div>
                 </button>
               ))}
             </div>
-          </Panel>
-          ) : null}
+          </aside>
 
-          <Panel
-            title="Conversa atual"
-            subtitle="Leia, assuma e responda daqui."
-            action={
-              <div className="inline-actions">
-                {!showInbox ? (
-                  <button className="button button--ghost" type="button" onClick={() => setShowInbox(true)}>
-                    <ChevronRight size={16} />
-                    Inbox
-                  </button>
-                ) : null}
-                {!showControls ? (
-                  <button className="button button--ghost" type="button" onClick={() => setShowControls(true)}>
-                    <SlidersHorizontal size={16} />
-                    Controles
-                  </button>
-                ) : null}
-              </div>
-            }
-          >
+          <section className="conversation-main">
             {threadLoading ? (
-              <EmptyState title="Abrindo conversa" description="Carregando histórico, lead e controles." />
+              <EmptyState title="Abrindo conversa" description="Carregando histórico e contexto operacional leve." />
             ) : !conversation || !lead ? (
               <EmptyState title="Selecione uma conversa" description="Ao clicar na thread, o chat completo aparece aqui." />
             ) : (
-              <div className="chat-thread">
-                <header className="chat-thread__header">
-                  <div>
-                    <strong>{lead.business_name}</strong>
-                    <p>{lead.niche} em {lead.city}</p>
+              <div className="conversation-thread">
+                <header className="conversation-thread__header">
+                  <div className="conversation-thread__identity">
+                    <span className="conversation-thread__avatar">{lead.business_name.slice(0, 1).toUpperCase()}</span>
+                    <div>
+                      <strong>{lead.business_name}</strong>
+                      <p>{buildConversationHeadline(lead, conversation)}</p>
+                      <small>
+                        Funil {lead.funnel_stage} • Fit {lead.fit_score ?? '—'}
+                        {lead.fit_label ? ` (${lead.fit_label})` : ''}
+                      </small>
+                    </div>
                   </div>
-                  <div className="chat-thread__badges">
+                  <div className="conversation-thread__header-actions">
                     <StatusPill tone={conversation.manual_mode ? 'warning' : 'info'}>
-                      {conversation.manual_mode ? 'Controle humano' : 'Controle do agente'}
+                      {conversationModeLabel(conversation)}
                     </StatusPill>
                     <StatusPill tone={conversation.automation_paused ? 'warning' : 'success'}>
-                      {conversation.automation_paused ? 'Automação pausada' : 'Automação ativa'}
+                      {conversation.automation_paused ? 'automação pausada' : 'automação ativa'}
                     </StatusPill>
                     <StatusPill tone={conversation.pending_human_review ? 'warning' : 'default'}>
                       {conversation.pending_human_review ? 'Review pendente' : conversation.stage}
                     </StatusPill>
+                    <StatusPill tone={currentSession?.outbound_cooldown_seconds ? 'warning' : 'success'}>
+                      Janela da linha: {formatDurationLabel(currentSession?.outbound_cooldown_seconds)}
+                    </StatusPill>
+                    <button className="button button--ghost button--icon" type="button" onClick={() => setActiveSheet('details')}>
+                      <Eye size={16} />
+                      Detalhes
+                    </button>
+                    <button className="button button--ghost button--icon" type="button" onClick={() => setActiveSheet('controls')}>
+                      <Settings2 size={16} />
+                      Controles
+                    </button>
+                    <button
+                      className="button button--ghost button--icon conversation-mobile-inbox"
+                      type="button"
+                      onClick={() => window.scrollTo({ top: 0, behavior: 'smooth' })}
+                    >
+                      <PanelLeftOpen size={16} />
+                      Inbox
+                    </button>
                   </div>
                 </header>
 
-                <div className="chat-thread__toolbar">
+                <div className="conversation-thread__toolbar">
                   <button className="button button--primary" onClick={() => void onTakeOver()}>
                     {actionLoading === 'takeover' ? 'Assumindo...' : 'Assumir'}
                   </button>
@@ -825,20 +943,12 @@ export function ConversationsPage() {
                   </button>
                 </div>
 
-                <article className="chat-summary">
-                  <strong>Resumo operacional</strong>
-                  <p>{conversation.summary || conversation.pending_review_reason || 'Ainda sem resumo automático desta conversa.'}</p>
-                </article>
-
                 {pendingAutoReplyTask ? (
-                  <article className="chat-queue-card">
+                  <article className="chat-queue-card chat-queue-card--soft">
                     <strong>Resposta automática agendada</strong>
                     <p>
                       O agente já viu a mensagem e vai responder em{' '}
-                      <strong>
-                        {formatCountdown(secondsUntil(pendingAutoReplyTask.next_run_at || undefined, nowMs)) || '00:00'}
-                      </strong>
-                      .
+                      <strong>{formatCountdown(secondsUntil(pendingAutoReplyTask.next_run_at || undefined, nowMs)) || '00:00'}</strong>.
                     </p>
                   </article>
                 ) : null}
@@ -850,27 +960,23 @@ export function ConversationsPage() {
                       {pendingQueuedOutboundTasks.length > 0 ? (
                         <>
                           {pendingQueuedOutboundTasks.length} mensagem(ns) desta conversa aguardando. Próxima saída em{' '}
-                          <strong>
-                            {formatCountdown(secondsUntil(scheduledAt(pendingQueuedOutboundTasks[0]), nowMs)) || '00:00'}
-                          </strong>
-                          {' '}e posição global{' '}
-                          <strong>#{queuePositionByTaskId.get(pendingQueuedOutboundTasks[0].id) || 1}</strong>.
+                          <strong>{formatCountdown(secondsUntil(scheduledAt(pendingQueuedOutboundTasks[0]), nowMs)) || '00:00'}</strong> e
+                          posição global <strong>#{queuePositionByTaskId.get(pendingQueuedOutboundTasks[0].id) || 1}</strong>.
                         </>
                       ) : (
                         <>
                           Há mensagem em fila nesta conversa. Próxima saída prevista em{' '}
-                          <strong>
-                            {formatCountdown(secondsUntil(nextQueuedMessageFallback?.scheduledFor, nowMs)) || '00:00'}
-                          </strong>
-                          .
+                          <strong>{formatCountdown(secondsUntil(nextQueuedMessageFallback?.scheduledFor, nowMs)) || '00:00'}</strong>.
                         </>
                       )}
+                    </p>
+                    <p>
+                      Janela configurada nesta linha: <strong>{formatDurationLabel(currentSession?.outbound_cooldown_seconds)}</strong>.
                     </p>
                   </article>
                 ) : null}
 
-                <div className="timeline timeline--workspace timeline--chat">
-                  <div className="timeline--chat-content">
+                <div ref={timelineRef} className="conversation-timeline">
                   {visibleMessages.map((message) => {
                     const delivery = getMessageDeliveryDetails(message, nowMs)
                     const matchingQueueTask = pendingQueuedOutboundTasks.find(
@@ -879,9 +985,7 @@ export function ConversationsPage() {
                     return (
                       <article
                         key={message.id}
-                        className={`message message--chat ${
-                          message.direction === 'outbound' ? 'message--outbound' : 'message--inbound'
-                        }`}
+                        className={`message message--chat ${message.direction === 'outbound' ? 'message--outbound' : 'message--inbound'}`}
                       >
                         <div className="message__meta">
                           <strong>{authorLabel(message)}</strong>
@@ -890,9 +994,7 @@ export function ConversationsPage() {
                         <p>{message.content}</p>
                         {message.direction === 'outbound' ? (
                           <div className="message-status">
-                            <StatusPill tone={delivery.tone as 'default' | 'success' | 'warning' | 'danger' | 'info'}>
-                              {delivery.label}
-                            </StatusPill>
+                            <StatusPill tone={delivery.tone}>{delivery.label}</StatusPill>
                             <small>{delivery.description}</small>
                             {matchingQueueTask ? (
                               <small>
@@ -908,13 +1010,12 @@ export function ConversationsPage() {
                       </article>
                     )
                   })}
-                  </div>
                 </div>
 
-                <form className="composer composer--chat" onSubmit={onSendManual}>
+                <form className="composer composer--chat composer--chat-premium" onSubmit={onSendManual}>
                   <textarea
                     className="field field--textarea"
-                    placeholder="Digite uma mensagem"
+                    placeholder="Digite uma mensagem e pressione Enter para enviar"
                     value={composer}
                     onChange={(event) => setComposer(event.target.value)}
                     onKeyDown={onComposerKeyDown}
@@ -930,125 +1031,161 @@ export function ConversationsPage() {
                 </form>
               </div>
             )}
-          </Panel>
-
-          {showControls ? (
-          <Panel
-            title="Controles da thread"
-            subtitle="Ajuste automação e contexto sem sair do chat."
-            action={
-              <button className="button button--ghost" type="button" onClick={() => setShowControls(false)}>
-                <ChevronRight size={16} />
-                Fechar
-              </button>
-            }
-          >
-            {!conversation || !lead ? (
-              <EmptyState title="Sem contexto carregado" description="Selecione uma thread para ver lead, controles e review." />
-            ) : (
-              <div className="chat-context">
-                <section className="context-section">
-                  <span className="context-section__title">Resumo rápido</span>
-                  <div className="kv-list">
-                    <div><span>Telefone</span><strong>{lead.phone_number || lead.whatsapp_number || '—'}</strong></div>
-                    <div><span>Responsável</span><strong>{conversation.assignee || 'livre'}</strong></div>
-                    <div><span>Última saída</span><strong>{formatDateTime(conversation.last_outbound_at)}</strong></div>
-                    <div><span>Última entrada</span><strong>{formatDateTime(conversation.last_inbound_at)}</strong></div>
-                    <div><span>Delay atual</span><strong>{conversation.reply_delay_seconds}s</strong></div>
-                  </div>
-                </section>
-
-                <section className="context-section">
-                  <span className="context-section__title">Automação</span>
-                  <label className="toggle-card">
-                    <input
-                      type="checkbox"
-                      checked={conversation.auto_reply_enabled}
-                      onChange={(event) =>
-                        setConversation((current) =>
-                          current ? { ...current, auto_reply_enabled: event.target.checked } : current,
-                        )
-                      }
-                    />
-                    <div>
-                      <strong>Auto reply nesta conversa</strong>
-                      <p>Liga ou desliga a resposta automática só desta thread.</p>
-                    </div>
-                  </label>
-
-                  <label className="toggle-card">
-                    <input
-                      type="checkbox"
-                      checked={conversation.automation_paused}
-                      onChange={(event) =>
-                        setConversation((current) =>
-                          current ? { ...current, automation_paused: event.target.checked } : current,
-                        )
-                      }
-                    />
-                    <div>
-                      <strong>Pausar automação</strong>
-                      <p>Bloqueia respostas do agente e follow-ups desta thread.</p>
-                    </div>
-                  </label>
-
-                  <label className="toggle-card">
-                    <input
-                      type="checkbox"
-                      checked={conversation.pending_human_review}
-                      onChange={(event) =>
-                        setConversation((current) =>
-                          current ? { ...current, pending_human_review: event.target.checked } : current,
-                        )
-                      }
-                    />
-                    <div>
-                      <strong>Exigir revisão humana</strong>
-                      <p>Se ligado, a resposta do agente vira rascunho antes do envio.</p>
-                    </div>
-                  </label>
-
-                  <label className="field-group">
-                    <span>Delay da resposta automática (segundos)</span>
-                    <input
-                      className="field"
-                      type="number"
-                      value={conversation.reply_delay_seconds}
-                      onChange={(event) =>
-                        setConversation((current) =>
-                          current ? { ...current, reply_delay_seconds: Number(event.target.value) } : current,
-                        )
-                      }
-                    />
-                  </label>
-                </section>
-
-                {lead.notes ? (
-                  <section className="context-section">
-                    <span className="context-section__title">Contexto do lead</span>
-                    <article className="note-card">
-                      <p>{lead.notes}</p>
-                    </article>
-                  </section>
-                ) : null}
-
-                {conversation.pending_draft ? (
-                  <section className="context-section">
-                    <span className="context-section__title">Rascunho pendente</span>
-                    <article className="note-card">
-                      <p>{conversation.pending_draft}</p>
-                    </article>
-                  </section>
-                ) : null}
-
-                <button className="button button--primary" onClick={() => void onSaveSettings()}>
-                  {actionLoading === 'save-settings' ? 'Salvando...' : 'Salvar controles da conversa'}
-                </button>
-              </div>
-            )}
-          </Panel>
-          ) : null}
+          </section>
         </section>
+      ) : null}
+
+      {activeSheet === 'details' && conversation && lead ? (
+        <ActionSheet
+          title="Detalhes da thread"
+          subtitle="Leitura operacional e contexto comercial sem esmagar o chat."
+          onClose={() => setActiveSheet(null)}
+        >
+          <section className="context-section">
+            <span className="context-section__title">Resumo rápido</span>
+            <div className="kv-list">
+              <div><span>Telefone</span><strong>{lead.phone_number || lead.whatsapp_number || '—'}</strong></div>
+              <div><span>Responsável</span><strong>{conversation.assignee || 'livre'}</strong></div>
+              <div><span>Última saída</span><strong>{formatDateTime(conversation.last_outbound_at)}</strong></div>
+              <div><span>Última entrada</span><strong>{formatDateTime(conversation.last_inbound_at)}</strong></div>
+              <div><span>Delay atual</span><strong>{conversation.reply_delay_seconds}s</strong></div>
+              <div><span>Cooldown da linha</span><strong>{formatDurationLabel(currentSession?.outbound_cooldown_seconds)}</strong></div>
+              <div><span>Fit</span><strong>{lead.fit_score ?? '—'} {lead.fit_label ? `(${lead.fit_label})` : ''}</strong></div>
+              <div><span>Intent</span><strong>{lead.intent_status}</strong></div>
+              <div><span>Dor</span><strong>{lead.pain_status}</strong></div>
+              <div><span>Meeting</span><strong>{lead.meeting_status}</strong></div>
+              <div><span>Objeção</span><strong>{lead.objection_status}</strong></div>
+            </div>
+          </section>
+
+          <section className="context-section">
+            <span className="context-section__title">Leitura operacional</span>
+            <article className="note-card">
+              <strong>Resumo</strong>
+              <p>{conversation.summary || conversation.pending_review_reason || 'Ainda sem resumo automático desta conversa.'}</p>
+            </article>
+            <article className="note-card">
+              <strong>Próxima ação sugerida</strong>
+              <p>
+                <strong>{lead.recommended_action?.label || 'Sem recomendação'}</strong>
+                {lead.recommended_action?.description ? ` • ${lead.recommended_action.description}` : ''}
+              </p>
+            </article>
+            {lead.suggested_playbook ? (
+              <article className="note-card">
+                <strong>Playbook sugerido</strong>
+                <p>
+                  <strong>{lead.suggested_playbook.name}</strong>
+                  {lead.suggested_playbook.applicability_reason ? ` • ${lead.suggested_playbook.applicability_reason}` : ''}
+                </p>
+                <p>{lead.suggested_playbook.instructions}</p>
+              </article>
+            ) : null}
+          </section>
+
+          {lead.notes ? (
+            <section className="context-section">
+              <span className="context-section__title">Contexto do lead</span>
+              <article className="note-card">
+                <p>{lead.notes}</p>
+              </article>
+            </section>
+          ) : null}
+
+          {conversation.pending_draft ? (
+            <section className="context-section">
+              <span className="context-section__title">Rascunho pendente</span>
+              <article className="note-card">
+                <p>{conversation.pending_draft}</p>
+              </article>
+            </section>
+          ) : null}
+        </ActionSheet>
+      ) : null}
+
+      {activeSheet === 'controls' && conversation && lead ? (
+        <ActionSheet
+          title="Controles da thread"
+          subtitle="Ajuste automação, revisão e timing sem perder a leitura da conversa."
+          onClose={() => setActiveSheet(null)}
+        >
+          <section className="context-section">
+            <span className="context-section__title">Automação</span>
+            <label className="toggle-card">
+              <input
+                type="checkbox"
+                checked={conversation.auto_reply_enabled}
+                onChange={(event) =>
+                  setWorkspace((current) =>
+                    current
+                      ? { ...current, conversation: { ...current.conversation, auto_reply_enabled: event.target.checked } }
+                      : current,
+                  )
+                }
+              />
+              <div>
+                <strong>Auto reply nesta conversa</strong>
+                <p>Liga ou desliga a resposta automática só desta thread.</p>
+              </div>
+            </label>
+
+            <label className="toggle-card">
+              <input
+                type="checkbox"
+                checked={conversation.automation_paused}
+                onChange={(event) =>
+                  setWorkspace((current) =>
+                    current
+                      ? { ...current, conversation: { ...current.conversation, automation_paused: event.target.checked } }
+                      : current,
+                  )
+                }
+              />
+              <div>
+                <strong>Pausar automação</strong>
+                <p>Bloqueia respostas do agente e follow-ups desta thread.</p>
+              </div>
+            </label>
+
+            <label className="toggle-card">
+              <input
+                type="checkbox"
+                checked={conversation.pending_human_review}
+                onChange={(event) =>
+                  setWorkspace((current) =>
+                    current
+                      ? { ...current, conversation: { ...current.conversation, pending_human_review: event.target.checked } }
+                      : current,
+                  )
+                }
+              />
+              <div>
+                <strong>Exigir revisão humana</strong>
+                <p>Se ligado, a resposta do agente vira rascunho antes do envio.</p>
+              </div>
+            </label>
+
+            <label className="field-group">
+              <span>Delay da resposta automática (segundos)</span>
+              <input
+                className="field"
+                type="number"
+                value={conversation.reply_delay_seconds}
+                onChange={(event) =>
+                  setWorkspace((current) =>
+                    current
+                      ? { ...current, conversation: { ...current.conversation, reply_delay_seconds: Number(event.target.value) } }
+                      : current,
+                  )
+                }
+              />
+            </label>
+
+            <button className="button button--primary" onClick={() => void onSaveSettings()}>
+              {actionLoading === 'save-settings' ? 'Salvando...' : 'Salvar controles da conversa'}
+            </button>
+          </section>
+        </ActionSheet>
       ) : null}
     </div>
   )

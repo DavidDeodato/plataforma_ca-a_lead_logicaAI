@@ -19,8 +19,13 @@ export function AppShell() {
     <div className={`app-shell ${sidebarCollapsed ? 'app-shell--collapsed' : ''}`}>
       <aside id="app-sidebar" className={`sidebar ${sidebarCollapsed ? 'sidebar--collapsed' : ''}`}>
         <div className="sidebar__brand">
-          <img className="sidebar__brand-full" src="/nexlead-logo-full.png" alt="NexLead" />
-          <span className="sidebar__brand-tag">Cockpit comercial</span>
+          <span className="sidebar__brand-mark" aria-hidden="true">
+            LA
+          </span>
+          <div className="sidebar__brand-copy">
+            <strong>Logica AI</strong>
+            <span className="sidebar__brand-tag">Operação comercial clara, leve e modular</span>
+          </div>
         </div>
         <nav className="sidebar__nav">
           {navItems.map(({ to, label, icon: Icon }) => (
@@ -38,16 +43,22 @@ export function AppShell() {
       </aside>
 
       <main className="content">
-        <button
-          className="content__sidebar-toggle"
-          type="button"
-          onClick={() => setSidebarCollapsed((current) => !current)}
-          aria-label={sidebarCollapsed ? 'Abrir menu lateral' : 'Fechar menu lateral'}
-          aria-expanded={!sidebarCollapsed}
-          aria-controls="app-sidebar"
-        >
-          <Menu size={18} />
-        </button>
+        <header className="content__topbar">
+          <button
+            className="content__sidebar-toggle"
+            type="button"
+            onClick={() => setSidebarCollapsed((current) => !current)}
+            aria-label={sidebarCollapsed ? 'Abrir menu lateral' : 'Fechar menu lateral'}
+            aria-expanded={!sidebarCollapsed}
+            aria-controls="app-sidebar"
+          >
+            <Menu size={18} />
+          </button>
+          <div className="content__topbar-copy">
+            <strong>Workspace</strong>
+            <span>Base única para prospectar, operar e fechar</span>
+          </div>
+        </header>
         <Outlet />
       </main>
     </div>

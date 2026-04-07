@@ -58,6 +58,8 @@ def test_runtime_settings_roundtrip(client: TestClient) -> None:
     assert payload["offer_name"] == "pagina de vendas"
     assert payload["offer_goal"] == "gerar mais agendamentos"
     assert "default_auto_reply_delay_seconds" in payload
+    assert payload["inbound_auto_reply_scope"] == "known_only"
+    assert payload["persist_unknown_inbound"] is True
 
 
 def test_dashboard_summary(client: TestClient) -> None:
@@ -67,6 +69,200 @@ def test_dashboard_summary(client: TestClient) -> None:
     payload = response.json()
     assert payload["totals"]["leads"] >= 1
     assert payload["safe_mode"]["outbound_enabled"] is False
+    assert "conversion" in payload
+    assert "funnel" in payload
+    assert "campaigns" in payload
+    assert "offers" in payload
+    assert "strategies" in payload
+    assert "recipes" in payload
+    assert payload["conversion"]["lead_fit_score_avg"] >= 0
+
+
+def test_modular_entities_link_campaign_and_saved_lead(monkeypatch, client: TestClient) -> None:
+    from app.api.routes import management as management_module
+
+    offer = client.post(
+        "/api/offer-products",
+        json={
+            "name": "Landing page modular",
+            "summary": "LP com foco em reuniões",
+            "objective": "agendar mais calls qualificadas",
+        },
+    ).json()
+    strategy = client.post(
+        "/api/agent-strategies",
+        json={
+            "name": "SDR consultivo",
+            "persona": "SDR senior",
+            "primary_goal": "abrir diagnóstico rápido",
+        },
+    ).json()
+    recipe = client.post(
+        "/api/prospecting-recipes",
+        json={
+            "name": "Recipe clay-like",
+            "objective": "achar leads quentes",
+            "system_prompt": "continuar até achar contatos válidos",
+            "source_channels": ["google", "linkedin"],
+            "minimum_valid_contacts": 1,
+            "max_total_results": 5,
+            "search_depth": 2,
+            "require_phone": True,
+            "validate_phone_format": False,
+            "discovery_mode": "hybrid",
+            "fallback_enabled": True,
+            "active": True,
+        },
+    ).json()
+    prompt_category = client.post(
+        "/api/prospecting-prompt-categories",
+        json={
+            "name": "Vender landing page para clinicas",
+            "description": "Testes de aquisição para clínicas com necessidade de captação.",
+            "offer_context": "Landing page focada em agendamento de avaliações.",
+            "target_niche": "clinica odontologica",
+        },
+    ).json()
+    prompt = client.post(
+        "/api/prospecting-prompts",
+        json={
+            "category_id": prompt_category["id"],
+            "name": "Clinica com sinal de compra recente",
+            "prompt_text": "Ache clínicas com sinal recente de necessidade comercial em {{city}}.",
+            "objective": "encontrar clinicas com urgência de captar mais pacientes",
+            "source_channels": ["google", "linkedin"],
+            "discovery_mode": "hybrid",
+            "minimum_valid_contacts": 1,
+            "require_phone": True,
+            "fallback_enabled": True,
+            "search_depth": 2,
+            "agent_max_credits": 200,
+            "notes": "Usar quando quiser rapidez com tese validada.",
+        },
+    ).json()
+
+    campaign = client.post(
+        "/api/campaigns",
+        json={
+            "name": "Campanha Modular",
+            "status": "active",
+            "niche": "clinica odontologica",
+            "city": "Vitoria, ES",
+            "offer_product_id": offer["id"],
+            "agent_strategy_id": strategy["id"],
+            "prospecting_recipe_id": recipe["id"],
+            "offer_name": "landing page modular",
+            "offer_summary": "lp para converter pacientes",
+            "offer_goal": "agendar mais avaliações",
+            "sales_tone": "consultivo",
+            "cta_style": "pedir reunião curta",
+            "auto_reply_enabled": False,
+            "reply_delay_seconds": 30,
+            "start_outreach_on_approve": False,
+            "is_active": True,
+        },
+    ).json()
+
+    def fake_find_leads(self, niche: str, city: str, limit: int = 10, recipe: dict | None = None) -> list[ProspectLead]:
+        return [
+            ProspectLead(
+                business_name="Lead Modular",
+                niche=niche,
+                city=city,
+                phone_number="+5527999988888",
+                source_url="https://example.com/lead-modular",
+                source_platform="web",
+                search_reason="sinal forte de compra em vaga e página institucional",
+            )
+        ]
+
+    monkeypatch.setattr(management_module.ProspectingService, "find_leads", fake_find_leads)
+
+    batch_response = client.post(
+        "/api/prospecting/batches/preview",
+        json={
+            "niche": "clinica odontologica",
+            "city": "Vitoria, ES",
+            "limit": 1,
+            "enrich": False,
+            "validate_phone_format": False,
+            "campaign_id": campaign["id"],
+            "prompt_category_id": prompt_category["id"],
+            "prompt_id": prompt["id"],
+        },
+    )
+    assert batch_response.status_code == 200
+    batch_payload = batch_response.json()
+    assert batch_payload["recipe_id"] == recipe["id"]
+    assert batch_payload["prompt_id"] == prompt["id"]
+    assert batch_payload["prompt_category_id"] == prompt_category["id"]
+    assert batch_payload["prompt_snapshot_json"]["name"] == prompt["name"]
+    assert batch_payload["search_metrics_json"]["discovery_mode"] == "hybrid"
+    assert batch_payload["search_metrics_json"]["prompt_name"] == prompt["name"]
+    assert batch_payload["candidates"][0]["search_reason"]
+    assert batch_payload["candidates"][0]["prospecting_prompt_id"] == prompt["id"]
+
+    applied = client.post(
+        f"/api/prospecting/batches/{batch_payload['id']}/apply",
+        json={"candidate_ids": [batch_payload["candidates"][0]["id"]], "action": "save_only"},
+    )
+    assert applied.status_code == 200
+    saved_candidate = applied.json()["candidates"][0]
+    assert saved_candidate["lead_id"] is not None
+
+    lead_detail = client.get(f"/api/leads/{saved_candidate['lead_id']}").json()
+    assert lead_detail["offer_product_id"] == offer["id"]
+    assert lead_detail["agent_strategy_id"] == strategy["id"]
+    assert lead_detail["prospecting_recipe_id"] == recipe["id"]
+    assert lead_detail["prospecting_prompt_category_id"] == prompt_category["id"]
+    assert lead_detail["prospecting_prompt_id"] == prompt["id"]
+    assert lead_detail["source_origin"] == "prospecting"
+
+    summary = client.get("/api/dashboard/summary").json()
+    assert any(item["name"] == "Landing page modular" for item in summary["offers"])
+    assert any(item["name"] == "SDR consultivo" for item in summary["strategies"])
+    assert any(item["name"] == "Recipe clay-like" for item in summary["recipes"])
+    assert any(item["name"] == prompt_category["name"] for item in summary["prompt_categories"])
+    assert any(item["name"] == prompt["name"] for item in summary["prospecting_prompts"])
+
+
+def test_unknown_inbound_is_persisted_but_not_auto_replied_when_scope_is_known_only(client: TestClient) -> None:
+    client.patch(
+        "/api/settings/runtime",
+        json={
+            "auto_reply_enabled": True,
+            "inbound_auto_reply_scope": "known_only",
+            "persist_unknown_inbound": True,
+        },
+    )
+
+    webhook_response = client.post(
+        "/webhooks/wasender",
+        json={
+            "event": "messages.received",
+            "data": {
+                "messages": {
+                    "key": {
+                        "id": "unknown-inbound-1",
+                        "fromMe": False,
+                        "remoteJid": "5527999919900@s.whatsapp.net",
+                        "cleanedSenderPn": "+5527999919900",
+                    },
+                    "messageBody": "oi, quero entender melhor",
+                    "message": {"conversation": "oi, quero entender melhor"},
+                }
+            },
+        },
+    )
+    assert webhook_response.status_code == 200
+
+    conversations = client.get("/api/conversations").json()["items"]
+    assert conversations[0]["inbound_unverified"] is True
+    assert conversations[0]["source_origin"] == "inbound_unknown"
+
+    tasks = client.get("/api/tasks").json()["items"]
+    delayed_auto_reply_tasks = [task for task in tasks if task["task_type"] == "delayed_auto_reply"]
+    assert delayed_auto_reply_tasks == []
 
 
 def test_lead_search_and_detail(client: TestClient) -> None:
@@ -83,6 +279,8 @@ def test_lead_search_and_detail(client: TestClient) -> None:
     detail_payload = detail_response.json()
     assert detail_payload["id"] == lead_id
     assert detail_payload["research_entries"] == []
+    assert detail_payload["fit_score"] is not None
+    assert detail_payload["funnel_stage"] == "captured"
 
 
 def test_manual_qualification_and_disqualification(client: TestClient) -> None:
@@ -99,11 +297,153 @@ def test_manual_qualification_and_disqualification(client: TestClient) -> None:
     assert qualify_response.status_code == 200
     qualified_payload = qualify_response.json()
     assert qualified_payload["status"] == "qualified"
+    assert qualified_payload["funnel_stage"] == "qualified_opportunity"
     assert qualified_payload["qualified_lead"]["score"] == 0.9
 
     disqualify_response = client.post(f"/api/leads/{lead_id}/disqualify")
     assert disqualify_response.status_code == 200
     assert disqualify_response.json()["status"] == "do_not_contact"
+    assert disqualify_response.json()["funnel_stage"] == "do_not_contact"
+
+
+def test_prospecting_candidates_and_conversations_expose_fit_and_stage_kpis(monkeypatch, client: TestClient) -> None:
+    from app.api.routes import management as management_module
+
+    def fake_find_leads(self, niche: str, city: str, limit: int = 10) -> list[ProspectLead]:
+        return [
+            ProspectLead(
+                business_name="Lead Fit Prospectado",
+                niche=niche,
+                city=city,
+                phone_number="+5527999977000",
+                instagram_url="https://instagram.com/leadfit",
+            )
+        ]
+
+    monkeypatch.setattr(management_module.ProspectingService, "find_leads", fake_find_leads)
+
+    batch_response = client.post(
+        "/api/prospecting/batches/preview",
+        json={
+            "niche": "barbearia",
+            "city": "Vitoria, ES",
+            "limit": 1,
+            "enrich": False,
+            "validate_phone_format": False,
+        },
+    )
+    assert batch_response.status_code == 200
+    batch_payload = batch_response.json()
+    assert batch_payload["candidates"][0]["fit_score"] is not None
+    assert batch_payload["candidates"][0]["fit_label"] in {"alto", "medio", "baixo"}
+
+    lead_id = _create_lead(client, business_name="Lead KPI", phone_number="+5527999977777")
+    start_response = client.post(f"/api/outreach/{lead_id}/start")
+    assert start_response.status_code == 200
+
+    conversations = client.get("/api/conversations").json()["items"]
+    target = next(item for item in conversations if item["lead_id"] == lead_id)
+    assert target["lead_fit_score"] is not None
+    assert target["lead_funnel_stage"] == "contacted"
+
+
+def test_leads_search_defaults_to_priority_sort(client: TestClient) -> None:
+    cold_lead_id = _create_lead(client, business_name="Lead Frio", phone_number="+5527999911101")
+    hot_lead_id = _create_lead(client, business_name="Lead Quente", phone_number="+5527999911102")
+
+    client.post(f"/api/leads/{hot_lead_id}/qualify", json={"score": 0.9, "qualification_reason": "Alta intenção"})
+
+    response = client.get("/api/leads/search")
+    assert response.status_code == 200
+    items = response.json()["items"]
+    assert items[0]["id"] == hot_lead_id
+    assert items[0]["priority_score"] >= items[1]["priority_score"]
+    assert items[0]["priority_label"] in {"agora", "alta"}
+    assert items[0]["recommended_action"]["label"] in {"Pedir reunião", "Fazer handoff", "Confirmar fit"}
+
+
+def test_conversations_list_defaults_to_priority_sort(client: TestClient) -> None:
+    first_lead_id = _create_lead(client, business_name="Conversa Fria", phone_number="+5527999911201")
+    second_lead_id = _create_lead(client, business_name="Conversa Quente", phone_number="+5527999911202")
+
+    first_start = client.post(f"/api/outreach/{first_lead_id}/start")
+    second_start = client.post(f"/api/outreach/{second_lead_id}/start")
+    assert first_start.status_code == 200
+    assert second_start.status_code == 200
+
+    hot_conversation_id = second_start.json()["id"]
+    client.post(
+        "/webhooks/wasender",
+        json={
+            "event": "messages.received",
+            "data": {
+                "messages": {
+                    "key": {
+                        "id": "priority-inbound-1",
+                        "fromMe": False,
+                        "remoteJid": "5527999911202@s.whatsapp.net",
+                        "cleanedSenderPn": "+5527999911202",
+                    },
+                    "messageBody": "tenho interesse, podemos agendar uma call",
+                    "message": {"conversation": "tenho interesse, podemos agendar uma call"},
+                }
+            },
+        },
+        headers={"x-webhook-signature": get_settings().wasender_webhook_secret},
+    )
+
+    response = client.get("/api/conversations")
+    assert response.status_code == 200
+    items = response.json()["items"]
+    assert items[0]["id"] == hot_conversation_id
+    assert items[0]["priority_score"] >= items[1]["priority_score"]
+    assert items[0]["priority_label"] in {"agora", "alta"}
+    assert items[0]["recommended_action"]["label"] in {"Responder agora", "Pedir reunião", "Revisar agora"}
+
+
+def test_lead_detail_exposes_recommended_action_for_missing_contact(client: TestClient) -> None:
+    lead_id = _create_lead(client, business_name="Lead Sem Contato", phone_number="+5527999911301")
+    client.patch(
+        f"/api/leads/{lead_id}",
+        json={"phone_number": None, "whatsapp_number": None},
+    )
+
+    response = client.get(f"/api/leads/{lead_id}")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["recommended_action"]["key"] == "fix_contact"
+    assert payload["recommended_action"]["label"] == "Completar contato"
+
+
+def test_lead_and_conversation_expose_suggested_playbook(client: TestClient) -> None:
+    lead_id = _create_lead(client, business_name="Lead Playbook", phone_number="+5527999911401")
+    create_playbook = client.post(
+        "/api/playbooks",
+        json={
+            "name": "Playbook Odonto Contacted",
+            "niche": "clinica odontologica",
+            "stage": "contacted",
+            "instructions": "Conduza a conversa de forma consultiva e leve para diagnóstico rápido.",
+            "objection_handling": "Se houver objeção de preço, volte para ROI e previsibilidade.",
+            "qualification_rules": "Confirme urgência, autoridade e interesse real.",
+            "active": True,
+        },
+    )
+    assert create_playbook.status_code == 200
+
+    start_response = client.post(f"/api/outreach/{lead_id}/start")
+    assert start_response.status_code == 200
+    conversation_id = start_response.json()["id"]
+
+    lead_response = client.get(f"/api/leads/{lead_id}")
+    assert lead_response.status_code == 200
+    lead_payload = lead_response.json()
+    assert lead_payload["suggested_playbook"]["name"] == "Playbook Odonto Contacted"
+
+    conversations = client.get("/api/conversations")
+    assert conversations.status_code == 200
+    thread = next(item for item in conversations.json()["items"] if item["id"] == conversation_id)
+    assert thread["suggested_playbook"]["name"] == "Playbook Odonto Contacted"
 
 
 def test_agent_preview_uses_runtime_offer(client: TestClient) -> None:
@@ -225,6 +565,154 @@ def test_webhook_from_me_reconciles_existing_outbound_message(monkeypatch, clien
     assert messages[0]["author_role"] == "agent"
     assert messages[0]["external_message_id"] == "3EB0RECONCILE123"
     assert messages[0]["status"] == "sent"
+
+
+def test_whatsapp_sessions_manual_create_activate_and_list(client: TestClient) -> None:
+    created = client.post(
+        "/api/whatsapp-sessions",
+        json={
+            "name": "Linha nova",
+            "phone_number": "+5527999000001",
+            "api_key": "session-key-1",
+            "webhook_secret": "secret-1",
+            "webhook_url": "https://example.com/webhooks/wasender",
+            "create_on_provider": False,
+            "set_active": True,
+        },
+    )
+    assert created.status_code == 200
+    created_payload = created.json()
+    assert created_payload["is_active"] is True
+    assert created_payload["has_api_key"] is True
+
+    second = client.post(
+        "/api/whatsapp-sessions",
+        json={
+            "name": "Linha antiga",
+            "phone_number": "+5527999000002",
+            "api_key": "session-key-2",
+            "webhook_secret": "secret-2",
+            "create_on_provider": False,
+            "set_active": False,
+        },
+    )
+    assert second.status_code == 200
+
+    activated = client.post(f"/api/whatsapp-sessions/{second.json()['id']}/activate")
+    assert activated.status_code == 200
+    assert activated.json()["is_active"] is True
+
+    workspace = client.get("/api/whatsapp-sessions")
+    assert workspace.status_code == 200
+    payload = workspace.json()
+    assert payload["active_session_id"] == second.json()["id"]
+    assert len(payload["items"]) >= 2
+
+
+def test_conversation_is_separated_by_whatsapp_session(client: TestClient) -> None:
+    lead_id = _create_lead(client, business_name="Loja Multi Linha", phone_number="+5527999011111")
+
+    first_session = client.post(
+        "/api/whatsapp-sessions",
+        json={
+            "name": "Linha A",
+            "phone_number": "+5527999000101",
+            "api_key": "session-a",
+            "webhook_secret": "secret-a",
+            "create_on_provider": False,
+            "set_active": True,
+        },
+    ).json()
+
+    first_outreach = client.post(f"/api/outreach/{lead_id}/start")
+    assert first_outreach.status_code == 200
+    assert first_outreach.json()["whatsapp_session_id"] == first_session["id"]
+
+    second_session = client.post(
+        "/api/whatsapp-sessions",
+        json={
+            "name": "Linha B",
+            "phone_number": "+5527999000102",
+            "api_key": "session-b",
+            "webhook_secret": "secret-b",
+            "create_on_provider": False,
+            "set_active": True,
+        },
+    ).json()
+
+    inbound = client.post(
+        "/webhooks/wasender",
+        json={
+            "event": "messages.received",
+            "data": {
+                "messages": {
+                    "key": {
+                        "id": "incoming-second-session",
+                        "fromMe": False,
+                        "remoteJid": "5527999011111@s.whatsapp.net",
+                        "cleanedSenderPn": "+5527999011111",
+                    },
+                    "messageBody": "oi pela segunda linha",
+                    "message": {"conversation": "oi pela segunda linha"},
+                }
+            },
+        },
+        headers={"x-webhook-signature": "secret-b"},
+    )
+    assert inbound.status_code == 200
+
+    conversations = client.get("/api/conversations", params={"page": 1, "page_size": 20}).json()["items"]
+    same_lead = [item for item in conversations if item["lead_id"] == lead_id]
+    assert len(same_lead) == 2
+    assert {item["whatsapp_session_id"] for item in same_lead} == {first_session["id"], second_session["id"]}
+
+
+def test_sync_and_qrcode_routes_use_provider_client(monkeypatch, client: TestClient) -> None:
+    from app.services import whatsapp_sessions as session_module
+
+    monkeypatch.setattr(
+        session_module.WasenderManagementClient,
+        "list_sessions",
+        lambda self: [{"id": 77, "name": "Linha Provider", "phone_number": "+5527999000303", "status": "connected"}],
+    )
+    monkeypatch.setattr(
+        session_module.WasenderManagementClient,
+        "get_session_details",
+        lambda self, session_id: {
+            "id": session_id,
+            "name": "Linha Provider",
+            "phone_number": "+5527999000303",
+            "status": "connected",
+            "api_key": "provider-api-key",
+            "webhook_secret": "provider-secret",
+            "webhook_enabled": True,
+            "webhook_events": ["messages.received"],
+        },
+    )
+    monkeypatch.setattr(
+        session_module.WasenderManagementClient,
+        "connect_session",
+        lambda self, session_id: {"status": "NEED_SCAN", "qrCode": "provider-qr-connect"},
+    )
+    monkeypatch.setattr(
+        session_module.WasenderManagementClient,
+        "get_session_qrcode",
+        lambda self, session_id: "provider-qr-refresh",
+    )
+
+    synced = client.post("/api/whatsapp-sessions/sync")
+    assert synced.status_code == 200
+    payload = synced.json()
+    assert any(item["name"] == "Linha Provider" for item in payload["items"])
+
+    provider_id = next(item["id"] for item in payload["items"] if item["name"] == "Linha Provider")
+    connect = client.post(f"/api/whatsapp-sessions/{provider_id}/connect")
+    assert connect.status_code == 200
+    assert connect.json()["qr_code"] == "provider-qr-connect"
+
+    refresh = client.get(f"/api/whatsapp-sessions/{provider_id}/qrcode")
+    assert refresh.status_code == 200
+    assert refresh.json()["qr_code"] == "provider-qr-refresh"
 
 
 def test_prospecting_batch_review_flow(monkeypatch, client: TestClient) -> None:
@@ -393,6 +881,34 @@ def test_campaign_playbook_and_knowledge_feed_agent_instruction(client: TestClie
     assert "Campanha Odonto Vix" in runtime_instruction
     assert "Playbook Odonto" in runtime_instruction
     assert "Prova social" in runtime_instruction
+    assert "Próxima ação sugerida" in runtime_instruction
+
+
+def test_agent_preview_contextualizes_instruction_with_suggested_playbook(client: TestClient) -> None:
+    lead_id = _create_lead(client, business_name="Clinica Estratégica", phone_number="+5527999988899")
+
+    client.post(
+        "/api/playbooks",
+        json={
+            "name": "Playbook Contacted Estratégico",
+            "niche": "clinica odontologica",
+            "stage": "contacted",
+            "instructions": "Depois do primeiro contato, conduza para diagnóstico rápido com CTA consultivo.",
+            "objection_handling": "Se houver resistência, use argumento de previsibilidade comercial.",
+            "qualification_rules": "Validar dor, urgência e autoridade.",
+            "active": True,
+        },
+    )
+
+    start_response = client.post(f"/api/outreach/{lead_id}/start")
+    assert start_response.status_code == 200
+
+    preview_response = client.post(f"/api/leads/{lead_id}/agent-preview", json={})
+    assert preview_response.status_code == 200
+    runtime_instruction = preview_response.json()["runtime_instruction"]
+    assert "Próxima ação sugerida" in runtime_instruction
+    assert "Playbook sugerido: Playbook Contacted Estratégico" in runtime_instruction
+    assert "Depois do primeiro contato, conduza para diagnóstico rápido com CTA consultivo." in runtime_instruction
 
 
 def test_prospecting_advisor_guides_search(client: TestClient) -> None:

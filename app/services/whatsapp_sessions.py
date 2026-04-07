@@ -117,6 +117,8 @@ class WhatsappSessionService:
         session.account_protection = bool(payload.get("account_protection", session.account_protection))
         session.log_messages = bool(payload.get("log_messages", session.log_messages))
         session.read_incoming_messages = bool(payload.get("read_incoming_messages", session.read_incoming_messages))
+        if payload.get("outbound_cooldown_seconds") is not None:
+            session.outbound_cooldown_seconds = max(0, int(payload["outbound_cooldown_seconds"]))
         session.source = source
         session.last_synced_at = utcnow()
         if activate:
@@ -143,6 +145,7 @@ class WhatsappSessionService:
         account_protection: bool,
         log_messages: bool,
         read_incoming_messages: bool,
+        outbound_cooldown_seconds: int | None,
         webhook_enabled: bool,
         webhook_url: str | None,
         webhook_events: list[str] | None,
@@ -163,7 +166,9 @@ class WhatsappSessionService:
         }
         if create_on_provider:
             provider_payload = WasenderManagementClient().create_session(payload)
-            return self.upsert_provider_session(db, provider_payload, source="wasender", activate=set_active)
+            session = self.upsert_provider_session(db, provider_payload, source="wasender", activate=set_active)
+            session.outbound_cooldown_seconds = outbound_cooldown_seconds
+            return session
 
         session = WhatsappSession(
             name=name,
@@ -177,6 +182,7 @@ class WhatsappSessionService:
             account_protection=account_protection,
             log_messages=log_messages,
             read_incoming_messages=read_incoming_messages,
+            outbound_cooldown_seconds=outbound_cooldown_seconds,
             source="manual",
             last_synced_at=utcnow(),
         )

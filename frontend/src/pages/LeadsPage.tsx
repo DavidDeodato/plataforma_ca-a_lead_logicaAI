@@ -34,6 +34,8 @@ export function LeadsPage() {
     status: '',
     niche: '',
     city: '',
+    sort_by: 'priority',
+    sort_direction: 'desc',
   })
 
   const params = useMemo(() => {
@@ -219,6 +221,24 @@ export function LeadsPage() {
             value={filters.city}
             onChange={(event) => setFilters((current) => ({ ...current, city: event.target.value }))}
           />
+          <select
+            className="field"
+            value={filters.sort_by}
+            onChange={(event) => setFilters((current) => ({ ...current, sort_by: event.target.value }))}
+          >
+            <option value="priority">Prioridade operacional</option>
+            <option value="fit_score">Fit score</option>
+            <option value="updated_at">Atualizados por último</option>
+            <option value="created_at">Criados por último</option>
+          </select>
+          <select
+            className="field"
+            value={filters.sort_direction}
+            onChange={(event) => setFilters((current) => ({ ...current, sort_direction: event.target.value }))}
+          >
+            <option value="desc">Maior primeiro</option>
+            <option value="asc">Menor primeiro</option>
+          </select>
           <button className="button button--primary" type="submit">
             Aplicar
           </button>
@@ -294,6 +314,31 @@ export function LeadsPage() {
       </Panel>
 
       <Panel title="Lista de leads" subtitle="Visão operacional com seleção em lote, preview e entrada no inbox.">
+        {!loading && !error && data && data.items.length > 0 ? (
+          <div className="stats-grid stats-grid--compact">
+            <article className="stat-card">
+              <span className="stat-card__label">Fit médio da página</span>
+              <strong className="stat-card__value">
+                {(data.items.reduce((total, lead) => total + (lead.fit_score || 0), 0) / data.items.length).toFixed(1)}
+              </strong>
+              <span className="stat-card__hint">qualidade do lote visível</span>
+            </article>
+            <article className="stat-card">
+              <span className="stat-card__label">Com contato válido</span>
+              <strong className="stat-card__value">
+                {data.items.filter((lead) => hasContactInfo(lead)).length}/{data.items.length}
+              </strong>
+              <span className="stat-card__hint">prontos para outreach</span>
+            </article>
+            <article className="stat-card">
+              <span className="stat-card__label">Oportunidades</span>
+              <strong className="stat-card__value">
+                {data.items.filter((lead) => lead.qualified_opportunity_at).length}
+              </strong>
+              <span className="stat-card__hint">já avançaram no funil</span>
+            </article>
+          </div>
+        ) : null}
         {loading ? <EmptyState title="Carregando leads" description="Buscando a base do banco e os filtros atuais." /> : null}
         {error ? <EmptyState title="Erro ao carregar leads" description={error} /> : null}
         {!loading && !error && data && data.items.length === 0 ? (
@@ -307,6 +352,10 @@ export function LeadsPage() {
                   <th></th>
                   <th>Negocio</th>
                   <th>Status</th>
+                  <th>Prioridade</th>
+                  <th>Próxima ação</th>
+                  <th>Funil</th>
+                  <th>Fit</th>
                   <th>Nicho</th>
                   <th>Cidade</th>
                   <th>Telefone</th>
@@ -332,6 +381,30 @@ export function LeadsPage() {
                     </td>
                     <td>
                       <StatusPill tone={lead.status === 'qualified' ? 'success' : 'info'}>{lead.status}</StatusPill>
+                    </td>
+                    <td>
+                      <div className="table__primary">
+                        <strong>{lead.priority_score ?? '—'}</strong>
+                        <span>{lead.priority_label || 'sem prioridade'}</span>
+                      </div>
+                    </td>
+                    <td>
+                      <div className="table__primary">
+                        <strong>{lead.recommended_action?.label || '—'}</strong>
+                        <span>{lead.recommended_action?.description || 'Sem recomendação ainda.'}</span>
+                      </div>
+                    </td>
+                    <td>
+                      <div className="table__primary">
+                        <strong>{lead.funnel_stage}</strong>
+                        <span>{lead.intent_status}</span>
+                      </div>
+                    </td>
+                    <td>
+                      <div className="table__primary">
+                        <strong>{lead.fit_score ?? '—'}</strong>
+                        <span>{lead.fit_label || 'sem score'}</span>
+                      </div>
                     </td>
                     <td>{lead.niche}</td>
                     <td>{lead.city}</td>

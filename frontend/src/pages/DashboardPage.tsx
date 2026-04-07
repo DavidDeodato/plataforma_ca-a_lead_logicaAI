@@ -54,9 +54,21 @@ export function DashboardPage() {
 
       <div className="stats-grid">
         <StatCard label="Leads totais" value={summary.totals.leads} hint="base consolidada" />
-        <StatCard label="Qualificados" value={summary.totals.qualified} hint="prontos para handoff" />
-        <StatCard label="Conversas" value={summary.totals.conversations} hint="threads no banco" />
-        <StatCard label="Tasks pendentes" value={summary.totals.tasks_pending} hint="fila operacional" />
+        <StatCard
+          label="KPI norte"
+          value={`${summary.conversion.meetings_qualified_per_100_contacted}%`}
+          hint="reuniões qualificadas por 100 contactados"
+        />
+        <StatCard
+          label="Reply rate"
+          value={`${summary.conversion.reply_rate}%`}
+          hint="responderam após primeiro contato"
+        />
+        <StatCard
+          label="Fit médio"
+          value={summary.conversion.lead_fit_score_avg}
+          hint="qualidade média do topo do funil"
+        />
       </div>
 
       <div className="page-grid">
@@ -126,6 +138,7 @@ export function DashboardPage() {
             <StatCard label="Contactados" value={summary.recent_activity.contacted} />
             <StatCard label="Responderam" value={summary.recent_activity.replied} />
             <StatCard label="Qualificados" value={summary.recent_activity.qualified} />
+            <StatCard label="Reuniões" value={summary.recent_activity.meetings_booked} />
           </div>
         </Panel>
 
@@ -139,6 +152,159 @@ export function DashboardPage() {
               <li key={note}>{note}</li>
             ))}
           </ul>
+        </Panel>
+      </div>
+
+      <div className="page-grid">
+        <Panel title="Scorecard de conversão" subtitle="Os KPIs que separam conversão real de volume cego.">
+          <div className="stats-grid stats-grid--compact">
+            <StatCard label="Opps/100" value={`${summary.conversion.qualified_opportunities_per_100_contacted}%`} />
+            <StatCard label="Resposta positiva" value={`${summary.conversion.positive_reply_rate}%`} />
+            <StatCard label="Dor confirmada" value={`${summary.conversion.pain_confirmed_rate}%`} />
+            <StatCard label="Aceite de reunião" value={`${summary.conversion.meeting_offer_acceptance_rate}%`} />
+            <StatCard label="Contato válido" value={`${summary.conversion.valid_contact_rate}%`} />
+            <StatCard label="Tempo 1º outreach" value={`${summary.operations.time_to_first_outreach_minutes} min`} />
+          </div>
+        </Panel>
+
+        <Panel title="Gargalo operacional" subtitle="Aqui voce descobre se a trava e operação ou persuasão.">
+          <div className="stats-grid stats-grid--compact">
+            <StatCard label="Mensagens outbound" value={summary.operations.outbound_messages} />
+            <StatCard label="Falhas de envio" value={summary.operations.outbound_failures} />
+            <StatCard label="Taxa de falha" value={`${summary.operations.send_failure_rate}%`} />
+            <StatCard label="Fila ativa" value={summary.operations.queued_tasks} />
+          </div>
+        </Panel>
+      </div>
+
+      <div className="page-grid">
+        <Panel title="Funil oficial" subtitle="Leitura direta de onde os leads estão travando.">
+          <div className="stats-grid stats-grid--compact">
+            <StatCard label="Captured" value={summary.funnel.captured} />
+            <StatCard label="Contacted" value={summary.funnel.contacted} />
+            <StatCard label="Replied" value={summary.funnel.replied} />
+            <StatCard label="Positive" value={summary.funnel.positive_reply} />
+            <StatCard label="Pain" value={summary.funnel.pain_confirmed} />
+            <StatCard label="Meeting" value={summary.funnel.meeting_booked} />
+            <StatCard label="Opportunity" value={summary.funnel.qualified_opportunity} />
+            <StatCard label="Lost" value={summary.funnel.closed_lost} />
+          </div>
+        </Panel>
+
+        <Panel title="Campanhas" subtitle="Scorecard por campanha para decidir onde insistir ou cortar.">
+          {summary.campaigns.length === 0 ? (
+            <EmptyState title="Sem campanhas ainda" description="Crie campanhas para começar a separar KPI por estratégia." />
+          ) : (
+            <div className="table-wrap">
+              <table className="table">
+                <thead>
+                  <tr>
+                    <th>Campanha</th>
+                    <th>Status</th>
+                    <th>Leads</th>
+                    <th>Reply</th>
+                    <th>Positiva</th>
+                    <th>Reuniões</th>
+                    <th>Opps</th>
+                    <th>Fit médio</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {summary.campaigns.map((campaign) => (
+                    <tr key={campaign.id}>
+                      <td>
+                        <div className="table__primary">
+                          <strong>{campaign.name}</strong>
+                          <span>{campaign.is_active ? 'ativa agora' : 'não ativa'}</span>
+                        </div>
+                      </td>
+                      <td>{campaign.status}</td>
+                      <td>{campaign.leads}</td>
+                      <td>{campaign.reply_rate}%</td>
+                      <td>{campaign.positive_reply_rate}%</td>
+                      <td>{campaign.meetings_booked}</td>
+                      <td>{campaign.qualified_opportunities}</td>
+                      <td>{campaign.fit_score_avg}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </Panel>
+      </div>
+
+      <div className="page-grid">
+        <Panel title="Categorias de prompt" subtitle="Teses comerciais que já têm histórico real de geração e conversão.">
+          {summary.prompt_categories.length === 0 ? (
+            <EmptyState title="Sem categorias rastreadas ainda" description="Use a biblioteca de prompts na prospecção para começar a medir teses." />
+          ) : (
+            <div className="table-wrap">
+              <table className="table">
+                <thead>
+                  <tr>
+                    <th>Categoria</th>
+                    <th>Leads</th>
+                    <th>Reply</th>
+                    <th>Positiva</th>
+                    <th>Reuniões</th>
+                    <th>Fechou</th>
+                    <th>Fit médio</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {summary.prompt_categories.map((item) => (
+                    <tr key={item.id}>
+                      <td>{item.name}</td>
+                      <td>{item.leads}</td>
+                      <td>{item.reply_rate}%</td>
+                      <td>{item.positive_reply_rate}%</td>
+                      <td>{item.meetings_booked}</td>
+                      <td>{item.closed_won}</td>
+                      <td>{item.fit_score_avg}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </Panel>
+
+        <Panel title="Prompts vencedores" subtitle="Comparativo das variações que já estão trazendo resultado de verdade.">
+          {summary.prospecting_prompts.length === 0 ? (
+            <EmptyState title="Sem prompts rastreados ainda" description="Assim que os prompts gerarem leads, o ranking aparece aqui." />
+          ) : (
+            <div className="table-wrap">
+              <table className="table">
+                <thead>
+                  <tr>
+                    <th>Prompt</th>
+                    <th>Categoria</th>
+                    <th>Leads</th>
+                    <th>Reply</th>
+                    <th>Positiva</th>
+                    <th>Reuniões</th>
+                    <th>Fechou</th>
+                    <th>Fit médio</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {summary.prospecting_prompts.map((item) => (
+                    <tr key={item.id}>
+                      <td>{item.name}</td>
+                      <td>{item.category_name || 'sem categoria'}</td>
+                      <td>{item.leads}</td>
+                      <td>{item.reply_rate}%</td>
+                      <td>{item.positive_reply_rate}%</td>
+                      <td>{item.meetings_booked}</td>
+                      <td>{item.closed_won}</td>
+                      <td>{item.fit_score_avg}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
         </Panel>
       </div>
     </div>
